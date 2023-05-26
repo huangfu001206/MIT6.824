@@ -39,6 +39,8 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 type Log struct {
+	Command interface{}
+	Term    int
 }
 type AppendEntriesArgs struct {
 	Term         int
@@ -191,9 +193,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if rf.currentTerm < args.Term {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
-		//if rf.license == Follower || rf.license == Candidate {
 		rf.license = Follower
-		//}
 	}
 	reply.Term = rf.currentTerm
 	if rf.votedFor == -1 {
@@ -201,11 +201,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
-	}
-	if reply.VoteGranted {
-		fmt.Printf("(%v) Term = %v vote for (%v)\n", rf.me, rf.currentTerm, args.CandidateId)
-	} else {
-		fmt.Printf("(%v) Term = %v refuse vote for (%v)\n", rf.me, rf.currentTerm, args.CandidateId)
 	}
 	if rf.license == Follower {
 		rf.timer.Reset(rf.heartBeatTime)
@@ -253,6 +248,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.agreeCount.Add(1)
 		if int(rf.agreeCount.Load())*2 >= len(rf.peers) && rf.license == Candidate {
 			rf.license = Leader
+			rf.leaderId = rf.me
 			rf.timer.Reset(0)
 		}
 	}
@@ -270,9 +266,42 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	rf.mu.Lock()
 	if rf.currentTerm < reply.Term {
 		rf.license = Follower
+		rf.timer.Reset(rf.heartBeatTime)
 	}
 	rf.mu.Unlock()
 	group.Done()
+	return ok
+}
+
+func (rf *Raft) sendLogCopyRequest(server int, args *RequestVoteArgs, reply *RequestVoteReply, queue *chan int, agreeCount *int32, count *int32) bool {
+	num := atomic.LoadInt32(agreeCount)
+	if int(num)*2 >= len(rf.peers) {
+		atomic.AddInt32(count, 1)
+		if num == 1 {
+			atomic.AddInt32(&num, 1)
+			*queue <- 1
+		}
+		return true
+	}
+	var ok = false
+	now := time.Now()
+	for !ok {
+		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
+		if time.Now().Sub(now) > time.Duration(2)*time.Millisecond {
+			break
+		}
+	}
+	if reply.VoteGranted {
+		atomic.AddInt32(agreeCount, 1)
+		if int(atomic.LoadInt32(agreeCount))*2 >= len(rf.peers) {
+			*queue <- 1
+			return ok
+		}
+	}
+	atomic.AddInt32(count, 1)
+	if int(atomic.LoadInt32(count)) == len(rf.peers) {
+		*queue <- 0
+	}
 	return ok
 }
 
@@ -291,11 +320,24 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
 
 	// Your code here (2B).
-
-	return index, term, isLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.license != Leader {
+		return 0, 0, false
+	}
+	defer func() {
+		go rf.logCopyReqProcess()
+	}()
+	term = rf.currentTerm
+	index = len(rf.log)
+	log := Log{
+		Term:    term,
+		Command: command,
+	}
+	rf.log = append(rf.log, log)
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -385,6 +427,33 @@ func (rf *Raft) HeartBeatProcess() {
 		wg.Wait()
 	}
 }
+func (rf *Raft) logCopyReqProcess() {
+	if rf.killed() == false {
+		rf.mu.Lock()
+		args := RequestVoteArgs{}
+		args.Term = rf.currentTerm
+		args.LastLogIndex = len(rf.log) - 1
+		args.LastLogTerm = rf.log[args.LastLogIndex].Term
+		rf.mu.Unlock()
+
+		reply := RequestVoteReply{
+			VoteGranted: false,
+		}
+		resChan := make(chan int)
+		var agreeCount int32
+		var count int32
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				go rf.sendLogCopyRequest(i, &args, &reply, &resChan, &agreeCount, &count)
+			}
+		}
+		res := <-resChan
+		if res == 1 {
+			//大多数节点满足条件，提交日志到状态机，并更新commitIndex，通过心跳通知其他节点
+		}
+
+	}
+}
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
@@ -407,10 +476,6 @@ func (rf *Raft) ticker() {
 				fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
 			}
 		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		//ms := 50 + (rand.Int63() % 300)
-		//time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 

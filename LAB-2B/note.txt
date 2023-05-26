@@ -1,0 +1,19 @@
+lab2B主体流程：
+    1、client发送请求至cluster，最终传给leader
+    2、leader收到request，新建日志去放command，并标记其term
+    3、leader开始向其他server发送日志拷贝请求
+    4、某个server收到日志拷贝请求，
+        首先判断currentTerm是否大于leader的Term
+            如果大于 拒绝
+            如果等于
+                判断日志长度：
+                    如果日志长度大于leader的日志长度 拒绝，反之，同意
+            如果小于
+                同意
+    5、当leader收到了超过半数的日志拷贝成功的信息，则将日志应用于自己的状态机，并更新commitIndex
+    6、通过心跳广播commitIndex，并且发送前一个日志的PreLogTerm以及PreLogIndex.
+    7、某个server收到请求后，通过比较PreLogIndex处对应的PreLogTerm
+        如果相互对应，则说明匹配成功，转step8
+        如果未对应，则匹配失败，返回失败信息
+        leader收到失败信息，则会将PreLogIndex-1，并找到对应的Term，继续发送，直到对应为止
+    8、可进行日志拷贝，并提交，更新其commitIndex，返回成功信息
