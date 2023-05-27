@@ -187,10 +187,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
-		reply.VoteGranted = false
 		return
-	} else if rf.currentTerm < args.Term {
+	} else if rf.currentTerm == args.Term {
+		if len(rf.log) != 0 {
+			if (rf.log[len(rf.log)-1].Term > args.LastLogTerm) ||
+				(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 >= args.LastLogIndex) {
+				return
+			}
+		}
+	} else {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
 		rf.license = Follower
@@ -199,8 +206,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor == -1 {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-	} else {
-		reply.VoteGranted = false
 	}
 	if rf.license == Follower {
 		rf.timer.Reset(rf.heartBeatTime)
@@ -247,9 +252,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.VoteGranted && rf.currentTerm == reply.Term {
 		rf.agreeCount.Add(1)
 		if int(rf.agreeCount.Load())*2 >= len(rf.peers) && rf.license == Candidate {
-			rf.license = Leader
-			rf.leaderId = rf.me
-			rf.timer.Reset(0)
+			rf.becomeLeaderInit()
 		}
 	}
 	if reply.Term > rf.currentTerm {
@@ -273,36 +276,45 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	return ok
 }
 
-func (rf *Raft) sendLogCopyRequest(server int, args *RequestVoteArgs, reply *RequestVoteReply, queue *chan int, agreeCount *int32, count *int32) bool {
-	num := atomic.LoadInt32(agreeCount)
-	if int(num)*2 >= len(rf.peers) {
-		atomic.AddInt32(count, 1)
-		if num == 1 {
-			atomic.AddInt32(&num, 1)
-			*queue <- 1
+func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, resChan *chan int) {
+	for !rf.killed() && atomic.LoadInt32(agreeNum)*2 < int32(len(rf.peers)) {
+		rf.mu.Lock()
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[server],
+			PrevLogTerm:  rf.log[rf.nextIndex[server]].Term,
+			Entries:      rf.log[rf.nextIndex[server]:],
+			LeaderCommit: rf.commitIndex,
 		}
-		return true
-	}
-	var ok = false
-	now := time.Now()
-	for !ok {
-		ok = rf.peers[server].Call("Raft.RequestVote", args, reply)
-		if time.Now().Sub(now) > time.Duration(2)*time.Millisecond {
+		rf.mu.Unlock()
+		reply := AppendEntriesReply{
+			Success: false,
+		}
+		rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
+		if reply.Success {
+			atomic.AddInt32(agreeNum, 1)
+			break
+		}
+		rf.nextIndex[server]--
+		if rf.nextIndex[server] < 0 || reply.Term == -1 {
+			rf.nextIndex[server] = -1
 			break
 		}
 	}
-	if reply.VoteGranted {
-		atomic.AddInt32(agreeCount, 1)
-		if int(atomic.LoadInt32(agreeCount))*2 >= len(rf.peers) {
-			*queue <- 1
-			return ok
-		}
+	atomic.AddInt32(sumNum, 1)
+
+}
+
+func (rf *Raft) becomeLeaderInit() {
+	rf.license = Leader
+	rf.leaderId = rf.me
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]int, len(rf.peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log)
 	}
-	atomic.AddInt32(count, 1)
-	if int(atomic.LoadInt32(count)) == len(rf.peers) {
-		*queue <- 0
-	}
-	return ok
+	rf.timer.Reset(0)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -388,13 +400,11 @@ func (rf *Raft) VoteProcess() {
 	}
 }
 func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Println("******** ReceiveMsgFromLeader *********")
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		fmt.Printf("(%v) : currentTerm > args.Term, currentTerm = %v args.Term = %v from %v\n", rf.me, rf.currentTerm, args.Term, args.LeaderId)
 		return
 	}
 	rf.currentTerm = args.Term
@@ -429,29 +439,16 @@ func (rf *Raft) HeartBeatProcess() {
 }
 func (rf *Raft) logCopyReqProcess() {
 	if rf.killed() == false {
-		rf.mu.Lock()
-		args := RequestVoteArgs{}
-		args.Term = rf.currentTerm
-		args.LastLogIndex = len(rf.log) - 1
-		args.LastLogTerm = rf.log[args.LastLogIndex].Term
-		rf.mu.Unlock()
-
-		reply := RequestVoteReply{
-			VoteGranted: false,
-		}
+		var agreeNum int32 = 0
+		var sumNum int32 = 0
 		resChan := make(chan int)
-		var agreeCount int32
-		var count int32
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				go rf.sendLogCopyRequest(i, &args, &reply, &resChan, &agreeCount, &count)
-			}
+		for i := range rf.peers {
+			go rf.sendLogCopyRequest(i, &agreeNum, &sumNum, &resChan)
 		}
-		res := <-resChan
-		if res == 1 {
-			//大多数节点满足条件，提交日志到状态机，并更新commitIndex，通过心跳通知其他节点
-		}
+		resp := <-resChan
+		switch resp {
 
+		}
 	}
 }
 func (rf *Raft) ticker() {
