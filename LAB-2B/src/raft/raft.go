@@ -99,7 +99,6 @@ type Raft struct {
 	heartBeatTime time.Duration
 	voteBasicTime int32
 	license       licenseType
-	leaderId      int
 	agreeCount    atomic.Int32
 }
 
@@ -265,7 +264,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, group *sync.WaitGroup) bool {
-	ok := rf.peers[server].Call("Raft.ReceiveMsgFromLeader", args, reply)
+	ok := rf.peers[server].Call("Raft.ReceiveHeartBeatFromLeader", args, reply)
 	rf.mu.Lock()
 	if rf.currentTerm < reply.Term {
 		rf.license = Follower
@@ -276,8 +275,8 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	return ok
 }
 
-func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, resChan *chan int) {
-	for !rf.killed() && atomic.LoadInt32(agreeNum)*2 < int32(len(rf.peers)) {
+func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int) {
+	for !rf.killed() {
 		rf.mu.Lock()
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -291,9 +290,14 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, r
 		reply := AppendEntriesReply{
 			Success: false,
 		}
-		rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
+		ok := false
+		for !ok {
+			ok = rf.peers[server].Call("Raft.ReceiveLogCopyFromLeader", &args, &reply)
+			time.Sleep(2 * time.Millisecond)
+		}
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
+			rf.matchIndex[server] = args.PrevLogIndex
 			break
 		}
 		rf.nextIndex[server]--
@@ -303,12 +307,18 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, r
 		}
 	}
 	atomic.AddInt32(sumNum, 1)
-
+	if atomic.LoadInt32(agreeNum)*2 >= int32(len(rf.peers)) && !flag.Load() {
+		*resChan <- 1
+		flag.Store(true)
+	}
+	if atomic.LoadInt32(sumNum) >= int32(len(rf.peers)) && !flag.Load() {
+		*resChan <- 0
+		flag.Store(true)
+	}
 }
 
 func (rf *Raft) becomeLeaderInit() {
 	rf.license = Leader
-	rf.leaderId = rf.me
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
@@ -340,7 +350,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return 0, 0, false
 	}
 	defer func() {
-		go rf.logCopyReqProcess()
+		go rf.logCopyReqProcess(len(rf.log) - 1)
 	}()
 	term = rf.currentTerm
 	index = len(rf.log)
@@ -399,7 +409,13 @@ func (rf *Raft) VoteProcess() {
 		fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, rf.agreeCount.Load(), len(rf.peers))
 	}
 }
-func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.Success = false
+	}
+}
+
+func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
@@ -410,9 +426,9 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 	rf.currentTerm = args.Term
 	fmt.Printf("(%v): receive message from leader --- args.term = %v currentTerm = %v\n", rf.me, args.Term, rf.currentTerm)
 	rf.license = Follower
-	rf.leaderId = args.LeaderId
 	rf.timer.Reset(rf.heartBeatTime)
 }
+
 func (rf *Raft) HeartBeatProcess() {
 	if rf.killed() == false {
 		args := AppendEntriesArgs{}
@@ -421,6 +437,7 @@ func (rf *Raft) HeartBeatProcess() {
 		fmt.Println("---------HeartBeatProcess------------")
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
+		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 
 		wg := sync.WaitGroup{}
@@ -437,17 +454,23 @@ func (rf *Raft) HeartBeatProcess() {
 		wg.Wait()
 	}
 }
-func (rf *Raft) logCopyReqProcess() {
+func (rf *Raft) logCopyReqProcess(index int) {
 	if rf.killed() == false {
-		var agreeNum int32 = 0
-		var sumNum int32 = 0
+		var agreeNum int32 = 1
+		var sumNum int32 = 1
+		var flag atomic.Bool
+		flag.Store(false)
 		resChan := make(chan int)
 		for i := range rf.peers {
-			go rf.sendLogCopyRequest(i, &agreeNum, &sumNum, &resChan)
+			if i != rf.me {
+				go rf.sendLogCopyRequest(i, &agreeNum, &sumNum, &flag, &resChan)
+			}
 		}
-		resp := <-resChan
-		switch resp {
-
+		res := <-resChan
+		if res == 1 {
+			rf.mu.Lock()
+			rf.commitIndex = index
+			rf.mu.Unlock()
 		}
 	}
 }
