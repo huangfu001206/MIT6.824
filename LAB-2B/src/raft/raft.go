@@ -281,8 +281,8 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: rf.nextIndex[server],
-			PrevLogTerm:  rf.log[rf.nextIndex[server]].Term,
+			PrevLogIndex: rf.nextIndex[server] - 1,
+			PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
 			Entries:      rf.log[rf.nextIndex[server]:],
 			LeaderCommit: rf.commitIndex,
 		}
@@ -301,7 +301,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			break
 		}
 		rf.nextIndex[server]--
-		if rf.nextIndex[server] < 0 || reply.Term == -1 {
+		if rf.nextIndex[server] <= 0 || reply.Term == -1 {
 			rf.nextIndex[server] = -1
 			break
 		}
@@ -322,7 +322,7 @@ func (rf *Raft) becomeLeaderInit() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = len(rf.log) + 1
 	}
 	rf.timer.Reset(0)
 }
@@ -428,8 +428,18 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 }
 
 func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.PrevLogTerm == rf.log[len(rf.log)-1].Term {
-
+	reply.Term = rf.currentTerm
+	reply.Success = false
+	if len(rf.log) == 0 {
+		reply.Success = true
+		rf.log = args.Entries
+	} else if args.PrevLogIndex < rf.commitIndex {
+		reply.Term = -1
+	} else if args.PrevLogIndex >= len(rf.log) {
+		return
+	} else if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+		reply.Success = true
+		rf.log = append(rf.log, args.Entries...)
 	}
 }
 
