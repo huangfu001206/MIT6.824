@@ -264,7 +264,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, group *sync.WaitGroup) bool {
-	ok := rf.peers[server].Call("Raft.ReceiveHeartBeatFromLeader", args, reply)
+	ok := rf.peers[server].Call("Raft.ReceiveMsgFromLeader", args, reply)
 	rf.mu.Lock()
 	if rf.currentTerm < reply.Term {
 		rf.license = Follower
@@ -292,7 +292,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		}
 		ok := false
 		for !ok {
-			ok = rf.peers[server].Call("Raft.ReceiveLogCopyFromLeader", &args, &reply)
+			ok = rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
 			time.Sleep(2 * time.Millisecond)
 		}
 		if reply.Success {
@@ -409,24 +409,43 @@ func (rf *Raft) VoteProcess() {
 		fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, rf.agreeCount.Load(), len(rf.peers))
 	}
 }
-func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.PrevLogIndex >= len(rf.log) {
-		reply.Success = false
+func min(x int, y int) int {
+	if x > y {
+		return y
 	}
+	return x
 }
 
 func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.currentTerm > args.Term {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
-	}
 	rf.currentTerm = args.Term
 	fmt.Printf("(%v): receive message from leader --- args.term = %v currentTerm = %v\n", rf.me, args.Term, rf.currentTerm)
 	rf.license = Follower
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+	}
+	reply.Success = true
 	rf.timer.Reset(rf.heartBeatTime)
+}
+
+func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.PrevLogTerm == rf.log[len(rf.log)-1].Term {
+
+	}
+}
+
+func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if rf.currentTerm > args.Term {
+		reply.Success = false
+		return
+	}
+	if len(rf.log) == 0 { //heartbeat
+		rf.ReceiveHeartBeatFromLeader(args, reply)
+	} else { //logCopy
+		rf.ReceiveLogCopyFromLeader(args, reply)
+	}
 }
 
 func (rf *Raft) HeartBeatProcess() {
