@@ -29,15 +29,6 @@ import (
 	"6.5840/labrpc"
 )
 
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in part 2D you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
 type Log struct {
 	Command interface{}
 	Term    int
@@ -56,6 +47,15 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+// as each Raft peer becomes aware that successive log entries are
+// committed, the peer should send an ApplyMsg to the service (or
+// tester) on the same server, via the applyCh passed to Make(). set
+// CommandValid to true to indicate that the ApplyMsg contains a newly
+// committed log entry.
+//
+// in part 2D you'll want to send other kinds of messages (e.g.,
+// snapshots) on the applyCh, but set CommandValid to false for these
+// other uses.
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -100,6 +100,7 @@ type Raft struct {
 	voteBasicTime int32
 	license       licenseType
 	agreeCount    atomic.Int32
+	applyMsgChan  *chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -187,14 +188,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
-	if rf.currentTerm > args.Term {
+	if rf.currentTerm > args.Term || rf.commitIndex > args.LastLogIndex {
 		return
 	} else if rf.currentTerm == args.Term {
-		if len(rf.log) != 0 {
-			if (rf.log[len(rf.log)-1].Term > args.LastLogTerm) ||
-				(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 >= args.LastLogIndex) {
-				return
-			}
+		if (rf.log[len(rf.log)-1].Term > args.LastLogTerm) ||
+			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 >= args.LastLogIndex) {
+			return
 		}
 	} else {
 		rf.votedFor = -1
@@ -286,6 +285,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			Entries:      rf.log[rf.nextIndex[server]:],
 			LeaderCommit: rf.commitIndex,
 		}
+		fmt.Printf("(%v) : sendLogCopyRequest: %v\n", rf.me, args)
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{
 			Success: false,
@@ -295,9 +295,11 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			ok = rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
 			time.Sleep(2 * time.Millisecond)
 		}
+		//rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
 			rf.matchIndex[server] = args.PrevLogIndex
+			rf.nextIndex[server] = args.PrevLogIndex + 1
 			break
 		}
 		rf.nextIndex[server]--
@@ -322,7 +324,7 @@ func (rf *Raft) becomeLeaderInit() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
-		rf.nextIndex[i] = len(rf.log) + 1
+		rf.nextIndex[i] = len(rf.log)
 	}
 	rf.timer.Reset(0)
 }
@@ -347,11 +349,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.license != Leader {
-		return 0, 0, false
+		return -1, -1, false
 	}
 	defer func() {
-		go rf.logCopyReqProcess(len(rf.log) - 1)
+		go rf.logCopyReqProcess(index)
 	}()
+	fmt.Printf("(%v) Start\n", rf.me)
 	term = rf.currentTerm
 	index = len(rf.log)
 	log := Log{
@@ -359,6 +362,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = index
+	}
 	return index, term, true
 }
 
@@ -386,7 +392,6 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) VoteProcess() {
 	if rf.killed() == false {
 		rf.mu.Lock()
-		//defer rf.mu.Unlock()
 		rf.license = Candidate
 		rf.currentTerm++
 		rf.votedFor = rf.me
@@ -395,6 +400,8 @@ func (rf *Raft) VoteProcess() {
 		reply := RequestVoteReply{}
 		args.Term = rf.currentTerm
 		args.CandidateId = rf.me
+		args.LastLogIndex = len(rf.log) - 1
+		args.LastLogTerm = rf.log[args.LastLogIndex].Term
 		rf.agreeCount.Store(1)
 		rf.mu.Unlock()
 
@@ -418,10 +425,21 @@ func min(x int, y int) int {
 
 func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.currentTerm = args.Term
-	fmt.Printf("(%v): receive message from leader --- args.term = %v currentTerm = %v\n", rf.me, args.Term, rf.currentTerm)
+	fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
 	rf.license = Follower
 	if args.LeaderCommit > rf.commitIndex {
+		preCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.lastApplied = rf.commitIndex
+		fmt.Printf("(%v) commitIndex (%v)  log: %v\n", rf.me, rf.commitIndex, rf.log)
+
+		for i := preCommitIndex + 1; i <= rf.commitIndex; i++ {
+			rf.sendCommitMsg2ApplyCh(ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			})
+		}
 	}
 	reply.Success = true
 	rf.timer.Reset(rf.heartBeatTime)
@@ -430,16 +448,14 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = false
-	if len(rf.log) == 0 {
-		reply.Success = true
-		rf.log = args.Entries
-	} else if args.PrevLogIndex < rf.commitIndex {
+	if args.PrevLogIndex < rf.commitIndex {
 		reply.Term = -1
 	} else if args.PrevLogIndex >= len(rf.log) {
 		return
 	} else if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 		reply.Success = true
-		rf.log = append(rf.log, args.Entries...)
+		rf.log = append(rf.log[0:args.PrevLogIndex+1], args.Entries...)
+		fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
 	}
 }
 
@@ -451,7 +467,7 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 		reply.Success = false
 		return
 	}
-	if len(rf.log) == 0 { //heartbeat
+	if len(args.Entries) == 0 { //heartbeat
 		rf.ReceiveHeartBeatFromLeader(args, reply)
 	} else { //logCopy
 		rf.ReceiveLogCopyFromLeader(args, reply)
@@ -463,7 +479,6 @@ func (rf *Raft) HeartBeatProcess() {
 		args := AppendEntriesArgs{}
 		rf.mu.Lock()
 		rf.timer.Reset(rf.heartBeatTime)
-		fmt.Println("---------HeartBeatProcess------------")
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.LeaderCommit = rf.commitIndex
@@ -496,10 +511,20 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			}
 		}
 		res := <-resChan
+		fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
 		if res == 1 {
 			rf.mu.Lock()
+			fmt.Println("index: ", index)
 			rf.commitIndex = index
+			rf.lastApplied = rf.commitIndex
+
 			rf.mu.Unlock()
+			go rf.HeartBeatProcess()
+			rf.sendCommitMsg2ApplyCh(ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.commitIndex].Command,
+				CommandIndex: index,
+			})
 		}
 	}
 }
@@ -528,6 +553,11 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) sendCommitMsg2ApplyCh(msg ApplyMsg) {
+	fmt.Printf("(%v) sendCommitMsg2ApplyCh  content: %v\n", rf.me, msg)
+	*rf.applyMsgChan <- msg
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -547,10 +577,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 1
 	rf.votedFor = -1
+	rf.commitIndex = 0
 	rf.license = Follower
+	rf.log = append(rf.log, Log{
+		Term:    -1,
+		Command: "start",
+	})
 	rf.heartBeatTime = time.Duration(100) * time.Millisecond
 	rf.voteBasicTime = 250
 	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%200) * time.Millisecond)
+	rf.applyMsgChan = &applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
