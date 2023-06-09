@@ -277,6 +277,10 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int) {
 	for !rf.killed() {
 		rf.mu.Lock()
+		if rf.nextIndex[server] <= 0 {
+			rf.mu.Unlock()
+			break
+		}
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -302,17 +306,20 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		//rf.mu.Lock()
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
+			rf.mu.Lock()
 			rf.matchIndex[server] = args.PrevLogIndex
 			rf.nextIndex[server] = args.PrevLogIndex + 1
-			//rf.mu.Unlock()
+			rf.mu.Unlock()
 			break
 		}
+		rf.mu.Lock()
 		rf.nextIndex[server]--
 		if rf.nextIndex[server] <= 0 || reply.Term == -1 {
-			rf.nextIndex[server] = -1
-			//rf.mu.Unlock()
+			rf.nextIndex[server] = 0
+			rf.mu.Unlock()
 			break
 		}
+		rf.mu.Unlock()
 	}
 	atomic.AddInt32(sumNum, 1)
 	if atomic.LoadInt32(agreeNum)*2 >= int32(len(rf.peers)) && !flag.Load() {
@@ -598,7 +605,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.license = Follower
 	rf.log = append(rf.log, Log{
-		Term:    -1,
+		Term:    0,
 		Command: "start",
 	})
 	rf.heartBeatTime = time.Duration(100) * time.Millisecond
