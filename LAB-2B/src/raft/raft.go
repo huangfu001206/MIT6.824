@@ -300,7 +300,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			if ok {
 				break
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 		//rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
 		//rf.mu.Lock()
@@ -334,7 +334,6 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 
 func (rf *Raft) becomeLeaderInit() {
 	rf.license = Leader
-	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
@@ -375,6 +374,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
+	fmt.Println(rf.log)
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = index
 	}
@@ -445,11 +445,13 @@ func max(x int, y int) int {
 
 func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.currentTerm = args.Term
-	fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
+	//fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
 	rf.license = Follower
 	if args.LeaderCommit > rf.commitIndex {
 		preCommitIndex := rf.commitIndex
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		//rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		fmt.Println("MatchIndex : ", rf.matchIndex)
+		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
 		fmt.Printf("(%v) commitIndex (%v)  log: %v\n", rf.me, rf.commitIndex, rf.log)
 
@@ -475,6 +477,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 	} else if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 		reply.Success = true
 		rf.log = append(rf.log[0:args.PrevLogIndex+1], args.Entries...)
+		rf.matchIndex[args.LeaderId] = len(rf.log) - 1
 		fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
 	}
 }
@@ -568,10 +571,10 @@ func (rf *Raft) ticker() {
 				fallthrough
 			case Candidate:
 				go rf.VoteProcess()
-				fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
+				//fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
 			case Leader:
 				go rf.HeartBeatProcess()
-				fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
+				//fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
 			}
 		}
 	}
@@ -603,6 +606,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 1
 	rf.votedFor = -1
 	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.matchIndex = make([]int, len(rf.peers))
 	rf.license = Follower
 	rf.log = append(rf.log, Log{
 		Term:    0,
