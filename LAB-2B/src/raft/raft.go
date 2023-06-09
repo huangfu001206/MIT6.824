@@ -293,18 +293,24 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		ok := false
 		for !ok {
 			ok = rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
+			if ok {
+				break
+			}
 			time.Sleep(2 * time.Millisecond)
 		}
 		//rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
+		//rf.mu.Lock()
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
 			rf.matchIndex[server] = args.PrevLogIndex
 			rf.nextIndex[server] = args.PrevLogIndex + 1
+			//rf.mu.Unlock()
 			break
 		}
 		rf.nextIndex[server]--
 		if rf.nextIndex[server] <= 0 || reply.Term == -1 {
 			rf.nextIndex[server] = -1
+			//rf.mu.Unlock()
 			break
 		}
 	}
@@ -423,6 +429,13 @@ func min(x int, y int) int {
 	return x
 }
 
+func max(x int, y int) int {
+	if x > y {
+		return x
+	}
+	return y
+}
+
 func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.currentTerm = args.Term
 	fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
@@ -516,15 +529,19 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			rf.mu.Lock()
 			fmt.Println("index: ", index)
 			rf.commitIndex = index
-			rf.lastApplied = rf.commitIndex
-
+			preIndex := rf.lastApplied
 			rf.mu.Unlock()
 			go rf.HeartBeatProcess()
-			rf.sendCommitMsg2ApplyCh(ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.commitIndex].Command,
-				CommandIndex: index,
-			})
+			for i := preIndex + 1; i <= index; i++ {
+				rf.sendCommitMsg2ApplyCh(ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[i].Command,
+					CommandIndex: i,
+				})
+			}
+			rf.mu.Lock()
+			rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -570,6 +587,7 @@ func (rf *Raft) sendCommitMsg2ApplyCh(msg ApplyMsg) {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu.Lock()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -587,6 +605,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteBasicTime = 250
 	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%200) * time.Millisecond)
 	rf.applyMsgChan = &applyCh
+
+	rf.mu.Unlock()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
