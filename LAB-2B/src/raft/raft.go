@@ -45,6 +45,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	Index   int //当记录当前日志的最大索引，减少rpc次数
 }
 
 // as each Raft peer becomes aware that successive log entries are
@@ -188,12 +189,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
-	if rf.currentTerm > args.Term || rf.commitIndex > args.LastLogIndex {
-		reply.Term = -1
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
 		return
 	} else if rf.currentTerm == args.Term {
-		if (rf.log[len(rf.log)-1].Term > args.LastLogTerm) ||
-			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 >= args.LastLogIndex) {
+		if rf.log[rf.commitIndex].Term > args.LastLogTerm || rf.commitIndex > args.LastLogIndex {
 			return
 		}
 	} else {
@@ -254,7 +254,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.becomeLeaderInit()
 		}
 	}
-	if reply.Term > rf.currentTerm || reply.Term == -1 {
+	if reply.Term > rf.currentTerm {
 		rf.license = Follower
 		rf.timer.Reset(rf.heartBeatTime)
 	}
@@ -294,6 +294,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{
 			Success: false,
+			Index:   -1,
 		}
 		ok := false
 		for !ok {
@@ -313,7 +314,12 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			break
 		}
 		rf.mu.Lock()
-		rf.nextIndex[server]--
+		fmt.Println("reply.Index : ", reply.Index)
+		if reply.Index != -1 {
+			rf.nextIndex[server] = reply.Index + 1
+		} else {
+			rf.nextIndex[server]--
+		}
 		if rf.nextIndex[server] <= 0 || reply.Term == -1 {
 			rf.nextIndex[server] = 0
 			rf.mu.Unlock()
@@ -418,12 +424,10 @@ func (rf *Raft) VoteProcess() {
 		reply := RequestVoteReply{}
 		args.Term = rf.currentTerm
 		args.CandidateId = rf.me
-		//args.LastLogIndex = len(rf.log) - 1
-		//args.LastLogTerm = rf.log[args.LastLogIndex].Term
 		args.LastLogIndex = rf.commitIndex
 		args.LastLogTerm = rf.log[args.LastLogIndex].Term
-		rf.agreeCount.Store(1)
 		rf.mu.Unlock()
+		rf.agreeCount.Store(1)
 
 		wg := sync.WaitGroup{}
 		wg.Add(len(rf.peers) - 1)
@@ -460,7 +464,7 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 		fmt.Printf("(%v): MatchIndex : %v  leaderId : %v\n", rf.me, rf.matchIndex, args.LeaderId)
 		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
-		fmt.Printf("(%v) commitIndex (%v)  log: %v\n", rf.me, rf.commitIndex, rf.log)
+		fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
 
 		for i := preCommitIndex + 1; i <= rf.commitIndex; i++ {
 			rf.sendCommitMsg2ApplyCh(ApplyMsg{
@@ -486,6 +490,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 	if args.PrevLogIndex < rf.commitIndex {
 		reply.Term = -1
 	} else if args.PrevLogIndex >= len(rf.log) {
+		reply.Index = len(rf.log) - 1
 		return
 	} else if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 		reply.Success = true
@@ -520,6 +525,7 @@ func (rf *Raft) HeartBeatProcess() {
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.LeaderCommit = rf.commitIndex
+		fmt.Printf("(%v): HeartBeatProcess  leadercommit: %v\n", rf.me, rf.commitIndex)
 		rf.mu.Unlock()
 
 		wg := sync.WaitGroup{}
@@ -553,10 +559,11 @@ func (rf *Raft) logCopyReqProcess(index int) {
 		if res == 1 {
 			rf.mu.Lock()
 			fmt.Println("index: ", index)
-			rf.commitIndex = index
+			rf.commitIndex = max(rf.commitIndex, index)
 			preIndex := rf.lastApplied
 			rf.mu.Unlock()
 			go rf.HeartBeatProcess()
+			//time.Sleep(2 * time.Millisecond)
 			for i := preIndex + 1; i <= index; i++ {
 				rf.sendCommitMsg2ApplyCh(ApplyMsg{
 					CommandValid: true,
