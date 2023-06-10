@@ -189,6 +189,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term || rf.commitIndex > args.LastLogIndex {
+		reply.Term = -1
 		return
 	} else if rf.currentTerm == args.Term {
 		if (rf.log[len(rf.log)-1].Term > args.LastLogTerm) ||
@@ -253,7 +254,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.becomeLeaderInit()
 		}
 	}
-	if reply.Term > rf.currentTerm {
+	if reply.Term > rf.currentTerm || reply.Term == -1 {
 		rf.license = Follower
 		rf.timer.Reset(rf.heartBeatTime)
 	}
@@ -265,7 +266,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, group *sync.WaitGroup) bool {
 	ok := rf.peers[server].Call("Raft.ReceiveMsgFromLeader", args, reply)
 	rf.mu.Lock()
-	if rf.currentTerm < reply.Term {
+	if rf.currentTerm < reply.Term || reply.Term == -1 {
 		rf.license = Follower
 		rf.timer.Reset(rf.heartBeatTime)
 	}
@@ -302,8 +303,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		//rf.peers[server].Call("Raft.ReceiveMsgFromLeader", &args, &reply)
-		//rf.mu.Lock()
+		fmt.Printf("reply : %v\n", reply)
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
 			rf.mu.Lock()
@@ -319,6 +319,11 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			rf.mu.Unlock()
 			break
 		}
+		if rf.currentTerm < reply.Term {
+			rf.mu.Unlock()
+			break
+		}
+
 		rf.mu.Unlock()
 	}
 	atomic.AddInt32(sumNum, 1)
@@ -413,7 +418,9 @@ func (rf *Raft) VoteProcess() {
 		reply := RequestVoteReply{}
 		args.Term = rf.currentTerm
 		args.CandidateId = rf.me
-		args.LastLogIndex = len(rf.log) - 1
+		//args.LastLogIndex = len(rf.log) - 1
+		//args.LastLogTerm = rf.log[args.LastLogIndex].Term
+		args.LastLogIndex = rf.commitIndex
 		args.LastLogTerm = rf.log[args.LastLogIndex].Term
 		rf.agreeCount.Store(1)
 		rf.mu.Unlock()
@@ -450,7 +457,7 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 	if args.LeaderCommit > rf.commitIndex {
 		preCommitIndex := rf.commitIndex
 		//rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-		fmt.Println("MatchIndex : ", rf.matchIndex)
+		fmt.Printf("(%v): MatchIndex : %v  leaderId : %v\n", rf.me, rf.matchIndex, args.LeaderId)
 		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
 		fmt.Printf("(%v) commitIndex (%v)  log: %v\n", rf.me, rf.commitIndex, rf.log)
@@ -462,11 +469,17 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 				CommandIndex: i,
 			})
 		}
+	} else if args.LeaderCommit < rf.commitIndex {
+		reply.Term = -1
 	}
 	reply.Success = true
 	rf.timer.Reset(rf.heartBeatTime)
 }
-
+func (rf *Raft) initNextIndex(value int) {
+	for i := range rf.peers {
+		rf.nextIndex[i] = value
+	}
+}
 func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = false
@@ -478,6 +491,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 		reply.Success = true
 		rf.log = append(rf.log[0:args.PrevLogIndex+1], args.Entries...)
 		rf.matchIndex[args.LeaderId] = len(rf.log) - 1
+		rf.initNextIndex(len(rf.log))
 		fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
 	}
 }
@@ -487,6 +501,7 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if rf.currentTerm > args.Term {
+		fmt.Println(rf.currentTerm, args.Term)
 		reply.Success = false
 		return
 	}
@@ -571,10 +586,10 @@ func (rf *Raft) ticker() {
 				fallthrough
 			case Candidate:
 				go rf.VoteProcess()
-				//fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
+				fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
 			case Leader:
 				go rf.HeartBeatProcess()
-				//fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
+				fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
 			}
 		}
 	}
@@ -608,6 +623,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]int, len(rf.peers))
 	rf.license = Follower
 	rf.log = append(rf.log, Log{
 		Term:    0,
