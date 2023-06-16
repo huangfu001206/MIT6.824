@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -263,7 +262,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, group *sync.WaitGroup) bool {
+func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.ReceiveMsgFromLeader", args, reply)
 	rf.mu.Lock()
 	if rf.currentTerm < reply.Term || reply.Term == -1 {
@@ -271,7 +270,6 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 		rf.timer.Reset(rf.heartBeatTime)
 	}
 	rf.mu.Unlock()
-	group.Done()
 	return ok
 }
 
@@ -290,7 +288,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			Entries:      rf.log[rf.nextIndex[server]:],
 			LeaderCommit: rf.commitIndex,
 		}
-		fmt.Printf("(%v) : sendLogCopyRequest: %v\n", rf.me, args)
+		//fmt.Printf("(%v) : sendLogCopyRequest: %v\n", rf.me, args)
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{
 			Success: false,
@@ -304,7 +302,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		fmt.Printf("reply : %v\n", reply)
+		//fmt.Printf("reply : %v\n", reply)
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
 			rf.mu.Lock()
@@ -314,7 +312,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			break
 		}
 		rf.mu.Lock()
-		fmt.Println("reply.Index : ", reply.Index)
+		//fmt.Println("reply.Index : ", reply.Index)
 		if reply.Index != -1 {
 			rf.nextIndex[server] = reply.Index + 1
 		} else {
@@ -377,7 +375,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer func() {
 		go rf.logCopyReqProcess(index)
 	}()
-	fmt.Printf("(%v) Start\n", rf.me)
+	//fmt.Printf("(%v) Start\n", rf.me)
 	term = rf.currentTerm
 	index = len(rf.log)
 	log := Log{
@@ -385,7 +383,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
-	fmt.Println(rf.log)
+	//fmt.Println(rf.log)
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = index
 	}
@@ -437,7 +435,7 @@ func (rf *Raft) VoteProcess() {
 			}
 		}
 		wg.Wait()
-		fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, rf.agreeCount.Load(), len(rf.peers))
+		//fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, rf.agreeCount.Load(), len(rf.peers))
 	}
 }
 func min(x int, y int) int {
@@ -461,10 +459,10 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 	if args.LeaderCommit > rf.commitIndex {
 		preCommitIndex := rf.commitIndex
 		//rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-		fmt.Printf("(%v): MatchIndex : %v  leaderId : %v\n", rf.me, rf.matchIndex, args.LeaderId)
+		//fmt.Printf("(%v): MatchIndex : %v  leaderId : %v\n", rf.me, rf.matchIndex, args.LeaderId)
 		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
-		fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
+		//fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
 
 		for i := preCommitIndex + 1; i <= rf.commitIndex; i++ {
 			rf.sendCommitMsg2ApplyCh(ApplyMsg{
@@ -497,7 +495,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 		rf.log = append(rf.log[0:args.PrevLogIndex+1], args.Entries...)
 		rf.matchIndex[args.LeaderId] = len(rf.log) - 1
 		rf.initNextIndex(len(rf.log))
-		fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
+		//fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
 	}
 }
 
@@ -506,7 +504,7 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if rf.currentTerm > args.Term {
-		fmt.Println(rf.currentTerm, args.Term)
+		//fmt.Println(rf.currentTerm, args.Term)
 		reply.Success = false
 		return
 	}
@@ -525,21 +523,18 @@ func (rf *Raft) HeartBeatProcess() {
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.LeaderCommit = rf.commitIndex
-		fmt.Printf("(%v): HeartBeatProcess  leadercommit: %v\n", rf.me, rf.commitIndex)
+		//fmt.Printf("(%v): HeartBeatProcess  leadercommit: %v\n", rf.me, rf.commitIndex)
 		rf.mu.Unlock()
 
-		wg := sync.WaitGroup{}
-		wg.Add(len(rf.peers) - 1)
 		for i := 0; i < len(rf.peers); i++ {
 			reply := AppendEntriesReply{
 				Term:    -1,
 				Success: false,
 			}
 			if i != rf.me {
-				go rf.sendHeartBeat(i, &args, &reply, &wg)
+				go rf.sendHeartBeat(i, &args, &reply)
 			}
 		}
-		wg.Wait()
 	}
 }
 func (rf *Raft) logCopyReqProcess(index int) {
@@ -555,14 +550,14 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			}
 		}
 		res := <-resChan
-		fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
+		//fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
 		if res == 1 {
 			rf.mu.Lock()
-			fmt.Println("index: ", index)
+			//fmt.Println("index: ", index)
 			rf.commitIndex = max(rf.commitIndex, index)
 			preIndex := rf.lastApplied
 			rf.mu.Unlock()
-			go rf.HeartBeatProcess()
+			rf.HeartBeatProcess()
 			//time.Sleep(2 * time.Millisecond)
 			for i := preIndex + 1; i <= index; i++ {
 				rf.sendCommitMsg2ApplyCh(ApplyMsg{
@@ -593,17 +588,17 @@ func (rf *Raft) ticker() {
 				fallthrough
 			case Candidate:
 				go rf.VoteProcess()
-				fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
+				//fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
 			case Leader:
 				go rf.HeartBeatProcess()
-				fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
+				//fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
 			}
 		}
 	}
 }
 
 func (rf *Raft) sendCommitMsg2ApplyCh(msg ApplyMsg) {
-	fmt.Printf("(%v) sendCommitMsg2ApplyCh  content: %v\n", rf.me, msg)
+	//fmt.Printf("(%v) sendCommitMsg2ApplyCh  content: %v\n", rf.me, msg)
 	*rf.applyMsgChan <- msg
 }
 
@@ -636,7 +631,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Term:    0,
 		Command: "start",
 	})
-	rf.heartBeatTime = time.Duration(100) * time.Millisecond
+	rf.heartBeatTime = time.Duration(150) * time.Millisecond
 	rf.voteBasicTime = 250
 	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%200) * time.Millisecond)
 	rf.applyMsgChan = &applyCh
