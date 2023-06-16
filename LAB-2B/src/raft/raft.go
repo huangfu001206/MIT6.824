@@ -95,12 +95,13 @@ type Raft struct {
 	nextIndex   []int
 	matchIndex  []int
 
-	timer         *time.Timer
-	heartBeatTime time.Duration
-	voteBasicTime int32
-	license       licenseType
-	agreeCount    atomic.Int32
-	applyMsgChan  *chan ApplyMsg
+	timer                  *time.Timer
+	heartBeatTime          time.Duration
+	voteBasicTime          int32
+	license                licenseType
+	agreeCount             atomic.Int32
+	applyMsgChan           *chan ApplyMsg
+	hasSendLogCopyMaxIndex map[int]int
 }
 
 // return currentTerm and whether this server
@@ -274,7 +275,15 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 }
 
 func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int) {
-	for !rf.killed() {
+	needToSend := true
+	rf.mu.Lock()
+	if rf.hasSendLogCopyMaxIndex[server] >= len(rf.log)-1 {
+		needToSend = false
+	} else {
+		rf.hasSendLogCopyMaxIndex[server] = len(rf.log) - 1
+	}
+	rf.mu.Unlock()
+	for !rf.killed() && needToSend {
 		rf.mu.Lock()
 		if rf.nextIndex[server] <= 0 {
 			rf.mu.Unlock()
@@ -314,7 +323,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		rf.mu.Lock()
 		//fmt.Println("reply.Index : ", reply.Index)
 		if reply.Index != -1 {
-			rf.nextIndex[server] = reply.Index + 1
+			rf.nextIndex[server] = reply.Index
 		} else {
 			rf.nextIndex[server]--
 		}
@@ -332,7 +341,10 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 	}
 	atomic.AddInt32(sumNum, 1)
 	if atomic.LoadInt32(agreeNum)*2 >= int32(len(rf.peers)) && !flag.Load() {
-		*resChan <- 1
+		rf.mu.Lock()
+		temp := rf.hasSendLogCopyMaxIndex[server]
+		rf.mu.Unlock()
+		*resChan <- temp
 		flag.Store(true)
 	}
 	if atomic.LoadInt32(sumNum) >= int32(len(rf.peers)) && !flag.Load() {
@@ -347,6 +359,7 @@ func (rf *Raft) becomeLeaderInit() {
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
 	}
+	rf.hasSendLogCopyMaxIndex = make(map[int]int)
 	rf.timer.Reset(0)
 }
 
@@ -458,8 +471,6 @@ func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *Appen
 	rf.license = Follower
 	if args.LeaderCommit > rf.commitIndex {
 		preCommitIndex := rf.commitIndex
-		//rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-		//fmt.Printf("(%v): MatchIndex : %v  leaderId : %v\n", rf.me, rf.matchIndex, args.LeaderId)
 		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
 		//fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
@@ -485,10 +496,11 @@ func (rf *Raft) initNextIndex(value int) {
 func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.Index = -1
 	if args.PrevLogIndex < rf.commitIndex {
 		reply.Term = -1
 	} else if args.PrevLogIndex >= len(rf.log) {
-		reply.Index = len(rf.log) - 1
+		reply.Index = len(rf.log)
 		return
 	} else if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 		reply.Success = true
@@ -504,7 +516,6 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if rf.currentTerm > args.Term {
-		//fmt.Println(rf.currentTerm, args.Term)
 		reply.Success = false
 		return
 	}
@@ -551,15 +562,13 @@ func (rf *Raft) logCopyReqProcess(index int) {
 		}
 		res := <-resChan
 		//fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
-		if res == 1 {
+		if res != 0 {
 			rf.mu.Lock()
-			//fmt.Println("index: ", index)
-			rf.commitIndex = max(rf.commitIndex, index)
+			rf.commitIndex = max(rf.commitIndex, res)
 			preIndex := rf.lastApplied
 			rf.mu.Unlock()
 			rf.HeartBeatProcess()
-			//time.Sleep(2 * time.Millisecond)
-			for i := preIndex + 1; i <= index; i++ {
+			for i := preIndex + 1; i <= res; i++ {
 				rf.sendCommitMsg2ApplyCh(ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log[i].Command,
@@ -626,6 +635,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
+	rf.hasSendLogCopyMaxIndex = make(map[int]int)
 	rf.license = Follower
 	rf.log = append(rf.log, Log{
 		Term:    0,
