@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -99,7 +101,6 @@ type Raft struct {
 	heartBeatTime          time.Duration
 	voteBasicTime          int32
 	license                licenseType
-	agreeCount             atomic.Int32
 	applyMsgChan           *chan ApplyMsg
 	hasSendLogCopyMaxIndex map[int]int
 }
@@ -128,12 +129,11 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -143,17 +143,14 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	temp := Raft{}
+	if d.Decode(&temp) != nil {
+
+	} else {
+		*rf = temp
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -187,6 +184,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
@@ -238,7 +236,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, group *sync.WaitGroup) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, group *sync.WaitGroup, agreeCount *int32) bool {
 	var ok = false
 	now := time.Now()
 	for !ok {
@@ -249,8 +247,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	rf.mu.Lock()
 	if reply.VoteGranted && rf.currentTerm == reply.Term {
-		rf.agreeCount.Add(1)
-		if int(rf.agreeCount.Load())*2 >= len(rf.peers) && rf.license == Candidate {
+		atomic.AddInt32(agreeCount, 1)
+		if int(atomic.LoadInt32(agreeCount))*2 >= len(rf.peers) && rf.license == Candidate {
 			rf.becomeLeaderInit()
 		}
 	}
@@ -258,6 +256,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.license = Follower
 		rf.timer.Reset(rf.heartBeatTime)
 	}
+	rf.persist()
 	rf.mu.Unlock()
 	group.Done()
 	return ok
@@ -269,6 +268,7 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	if rf.currentTerm < reply.Term || reply.Term == -1 {
 		rf.license = Follower
 		rf.timer.Reset(rf.heartBeatTime)
+		rf.persist()
 	}
 	rf.mu.Unlock()
 	return ok
@@ -281,6 +281,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		needToSend = false
 	} else {
 		rf.hasSendLogCopyMaxIndex[server] = len(rf.log) - 1
+		rf.persist()
 	}
 	rf.mu.Unlock()
 	for !rf.killed() && needToSend {
@@ -317,6 +318,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			rf.mu.Lock()
 			rf.matchIndex[server] = args.PrevLogIndex
 			rf.nextIndex[server] = args.PrevLogIndex + 1
+			rf.persist()
 			rf.mu.Unlock()
 			break
 		}
@@ -329,14 +331,15 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 		}
 		if rf.nextIndex[server] <= 0 || reply.Term == -1 {
 			rf.nextIndex[server] = 0
+			rf.persist()
 			rf.mu.Unlock()
 			break
 		}
+		rf.persist()
 		if rf.currentTerm < reply.Term {
 			rf.mu.Unlock()
 			break
 		}
-
 		rf.mu.Unlock()
 	}
 	atomic.AddInt32(sumNum, 1)
@@ -361,6 +364,7 @@ func (rf *Raft) becomeLeaderInit() {
 	}
 	rf.hasSendLogCopyMaxIndex = make(map[int]int)
 	rf.timer.Reset(0)
+	rf.persist()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -400,6 +404,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = index
 	}
+	rf.persist()
 	return index, term, true
 }
 
@@ -417,6 +422,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.license = Follower
+	rf.persist()
 	rf.mu.Unlock()
 }
 
@@ -437,18 +443,20 @@ func (rf *Raft) VoteProcess() {
 		args.CandidateId = rf.me
 		args.LastLogIndex = rf.commitIndex
 		args.LastLogTerm = rf.log[args.LastLogIndex].Term
+		rf.persist()
 		rf.mu.Unlock()
-		rf.agreeCount.Store(1)
 
+		var agreeCount int32
+		atomic.StoreInt32(&agreeCount, 1)
 		wg := sync.WaitGroup{}
 		wg.Add(len(rf.peers) - 1)
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
-				go rf.sendRequestVote(i, &args, &reply, &wg)
+				go rf.sendRequestVote(i, &args, &reply, &wg, &agreeCount)
 			}
 		}
 		wg.Wait()
-		//fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, rf.agreeCount.Load(), len(rf.peers))
+		//fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, atomic.LoadInt32(&agreeCount), len(rf.peers))
 	}
 }
 func min(x int, y int) int {
@@ -513,6 +521,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 
 func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if rf.currentTerm > args.Term {
@@ -566,6 +575,7 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			rf.mu.Lock()
 			rf.commitIndex = max(rf.commitIndex, res)
 			preIndex := rf.lastApplied
+			rf.persist()
 			rf.mu.Unlock()
 			rf.HeartBeatProcess()
 			for i := preIndex + 1; i <= res; i++ {
@@ -577,6 +587,7 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			}
 			rf.mu.Lock()
 			rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
+			rf.persist()
 			rf.mu.Unlock()
 		}
 	}
