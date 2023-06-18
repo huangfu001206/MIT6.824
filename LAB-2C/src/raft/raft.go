@@ -105,6 +105,19 @@ type Raft struct {
 	hasSendLogCopyMaxIndex map[int]int
 }
 
+type PersistRaft struct {
+	CurrentTerm            int
+	VotedFor               int
+	Log                    []Log
+	CommitIndex            int
+	LastApplied            int
+	NextIndex              []int
+	MatchIndex             []int
+	License                licenseType
+	ApplyMsgChan           *chan ApplyMsg
+	HasSendLogCopyMaxIndex map[int]int
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -126,12 +139,28 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
+
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
+	//fmt.Printf("(%v) : persist\n", rf.me)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf)
+	persistRaft := PersistRaft{
+		CurrentTerm:            rf.currentTerm,
+		VotedFor:               rf.votedFor,
+		Log:                    rf.log,
+		CommitIndex:            rf.commitIndex,
+		LastApplied:            rf.lastApplied,
+		NextIndex:              rf.nextIndex,
+		MatchIndex:             rf.matchIndex,
+		License:                rf.license,
+		HasSendLogCopyMaxIndex: rf.hasSendLogCopyMaxIndex,
+	}
+	err := e.Encode(persistRaft)
+	if err != nil {
+		panic("Encode Failed")
+	}
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
 }
@@ -143,13 +172,22 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
+	//fmt.Printf("(%v) : readPersist\n", rf.me)
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	temp := Raft{}
-	if d.Decode(&temp) != nil {
-
+	temp := PersistRaft{}
+	if d.Decode(&temp) == nil {
+		rf.currentTerm = temp.CurrentTerm
+		rf.votedFor = temp.VotedFor
+		rf.log = temp.Log
+		rf.commitIndex = temp.CommitIndex
+		rf.lastApplied = temp.LastApplied
+		rf.nextIndex = temp.NextIndex
+		rf.matchIndex = temp.MatchIndex
+		rf.license = temp.License
+		rf.hasSendLogCopyMaxIndex = temp.HasSendLogCopyMaxIndex
 	} else {
-		*rf = temp
+		panic("Decode Failed")
 	}
 }
 
@@ -207,6 +245,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.license == Follower {
 		rf.timer.Reset(rf.heartBeatTime)
 	}
+	return
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -533,6 +572,7 @@ func (rf *Raft) ReceiveMsgFromLeader(args *AppendEntriesArgs, reply *AppendEntri
 	} else { //logCopy
 		rf.ReceiveLogCopyFromLeader(args, reply)
 	}
+	return
 }
 
 func (rf *Raft) HeartBeatProcess() {
