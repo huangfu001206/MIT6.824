@@ -25,12 +25,12 @@ type ExampleReply struct {
 // Add your RPC definitions here.
 type ApplyTaskArgs struct {
 	MessageType MsgType
-	TaskType    TaskType
+	TaskType    TaskTypes
 	TaskId      int
 	FilePath    []string
 }
 type ApplyTaskReply struct {
-	TaskType     TaskType
+	TaskType     TaskTypes
 	FileNameList []string
 	TaskId       int
 	WorkerId     int

@@ -1,7 +1,7 @@
 package mr
 
 import (
-	"fmt"
+	//"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -45,10 +45,10 @@ type TaskState struct {
 /**
 rpc通信用来标识是Map任务还是Reduce任务或其他等待信息
 */
-type TaskType int
+type TaskTypes int
 
 const (
-	MapTask TaskType = iota + 1
+	MapTask TaskTypes = iota + 1
 	ReduceTask
 	Wait
 )
@@ -220,7 +220,7 @@ func (c *Coordinator) putTaskToMap(files []string) {
 			taskId:   index,
 			filename: f,
 		}
-		fmt.Println(task.taskId, task.filename)
+		//fmt.Println(task.taskId, task.filename)
 		c.chanMap <- task
 		c.id4FileNameMutex.Lock()
 		c.mTaskId4FileName[index] = f
@@ -266,9 +266,9 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	fmt.Println("*********** coordinator start **************")
+	//fmt.Println("*********** coordinator start **************")
 	c := Coordinator{}
-	fmt.Println(len(files))
+	//fmt.Println(len(files))
 	// Your code here.
 	c.nReduce.Store(int32(nReduce))
 	c.nTask.Store(int32(len(files)))
