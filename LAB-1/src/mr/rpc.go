@@ -34,7 +34,7 @@ type ApplyTaskReply struct {
 	FileNameList []string
 	TaskId       int
 	WorkerId     int
-	nReduce      int
+	NReduce      int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

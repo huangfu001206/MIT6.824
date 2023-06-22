@@ -3,8 +3,6 @@ package mr
 import (
 	"encoding/json"
 	"fmt"
-
-	//"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
@@ -46,7 +44,6 @@ func createMapTempFile(nReduce int, workerId int, filenameList *[]string, tempFi
 		build.WriteString(strconv.Itoa(i))
 		filename := build.String()
 		f, _ := ioutil.TempFile("./", filename)
-		//f, _ := os.Create(filename)
 		*filenameList = append(*filenameList, filename)
 		*tempFileNameList = append(*tempFileNameList, f.Name())
 		encList = append(encList, json.NewEncoder(f))
@@ -56,7 +53,7 @@ func createMapTempFile(nReduce int, workerId int, filenameList *[]string, tempFi
 func runMapByWorker(reply *ApplyTaskReply, mapf func(string, string) []KeyValue) {
 	//pathPrefix := "../main/"
 	pathPrefix := ""
-	reply.nReduce = 10
+	//reply.NReduce = 10
 	fullPath := pathPrefix + reply.FileNameList[0]
 	file, err := os.Open(fullPath)
 	if err != nil {
@@ -70,9 +67,9 @@ func runMapByWorker(reply *ApplyTaskReply, mapf func(string, string) []KeyValue)
 	kva := mapf(fullPath, string(content))
 	var fileNameList []string
 	var tempFileNameList []string
-	encList := createMapTempFile(reply.nReduce, reply.WorkerId, &fileNameList, &tempFileNameList)
+	encList := createMapTempFile(reply.NReduce, reply.WorkerId, &fileNameList, &tempFileNameList)
 	for _, kv := range kva {
-		index := ihash(kv.Key) % reply.nReduce
+		index := ihash(kv.Key) % reply.NReduce
 		encList[index].Encode(kv)
 	}
 	reNameFileAndDeleteTempFile(&fileNameList, &tempFileNameList)
@@ -80,17 +77,7 @@ func runMapByWorker(reply *ApplyTaskReply, mapf func(string, string) []KeyValue)
 }
 func reNameFileAndDeleteTempFile(fileNameList *[]string, tempFileNameList *[]string) {
 	for index, _ := range *fileNameList {
-		//_, err := os.Stat((*fileNameList)[index])
-		//if err == nil {
-		//	//如果文件存在
-		//	err := os.Remove((*tempFileNameList)[index])
-		//	if err != nil {
-		//		log.Fatalf("file remove failed, err: %v", err)
-		//	}
-		//	continue
-		//}
 		err := os.Rename((*tempFileNameList)[index], (*fileNameList)[index])
-		////fmt.Println((*tempFileNameList)[index], (*fileNameList)[index])
 		if err != nil {
 			log.Fatalf("file rename failed, err: %v", err)
 		}
@@ -122,7 +109,6 @@ func runReduceByWorker(reply *ApplyTaskReply, reducef func(string, []string) str
 	kvList := reduceReadFile(reply.FileNameList)
 	oname := "mr-out-" + strconv.Itoa(reply.TaskId)
 	ofile, _ := ioutil.TempFile("./", oname)
-	//ofile, _ := os.Create(oname)
 	i := 0
 	for i < len(kvList) {
 		j := i + 1
@@ -164,7 +150,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			case ReduceTask:
 				runReduceByWorker(&reply, reducef)
 			case Wait:
-				time.Sleep(time.Second * 5)
+				time.Sleep(time.Second * 2)
 			}
 		}
 	}
@@ -178,11 +164,13 @@ func ApplyForTask() (ApplyTaskReply, bool) {
 	reply := ApplyTaskReply{}
 	args.MessageType = TaskApply
 	ok := call("Coordinator.RunTask", &args, &reply)
+	//fmt.Println(reply)
+
 	if ok {
 		// reply.Y should be 100.
 		return reply, true
 	} else {
-		////fmt.Printf("call failed!\n")
+		//fmt.Printf("call failed!\n")
 	}
 	return ApplyTaskReply{}, false
 }
@@ -198,9 +186,9 @@ func WorkerFinishWork(taskType TaskTypes, taskId int, filePath []string) {
 	call("Coordinator.RunTask", &args, &reply)
 	//if ok {
 	//	// reply.Y should be 100.
-	////	fmt.Println("send task-finished message success")
+	///fmt.Println("send task-finished message success")
 	//} else {
-	////	fmt.Printf("call failed!\n")
+	///fmt.Printf("call failed!\n")
 	//}
 }
 
@@ -225,9 +213,9 @@ func CallExample() {
 	ok := call("Coordinator.RunTask", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
-		//fmt.Printf("reply.Y %v\n", reply.Y)
+		fmt.Printf("reply.Y %v\n", reply.Y)
 	} else {
-		//fmt.Printf("call failed!\n")
+		fmt.Printf("call failed!\n")
 	}
 }
 

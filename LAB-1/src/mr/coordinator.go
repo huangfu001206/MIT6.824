@@ -16,29 +16,13 @@ import "net/http"
 
 /*
 *
-map任务 数据结构
-*/
-type chanMapTask struct {
-	filename string
-	taskId   int
-}
 
-/*
-*
-reduce任务 数据结构
+	任务 数据结构
 */
-type chanReduceTask struct {
+type chanTask struct {
 	filename []string
 	taskId   int
-}
-
-// TaskState
-/**
-用来标识任务的开始时间、任务id
-*/
-type TaskState struct {
-	startTime time.Time
-	workId    int
+	taskType TaskTypes
 }
 
 //TaskType --- reply
@@ -66,42 +50,36 @@ const (
 
 type Coordinator struct {
 	// Your definitions here.
-	nReduce              atomic.Int32
-	nTask                atomic.Int32
-	chanMap              chan chanMapTask
-	chanReduce           chan chanReduceTask
-	mapTaskState         map[int]TaskState //正在进行中的map任务
-	reduceTaskState      map[int]TaskState //正在进行中的reduce人物
-	mTaskId4FileName     map[int]string    //map任务中taskId与filename的对应关系
-	rTaskId4FileNameList map[int][]string  //reduce任务中taskId与filenameList的对应关系
-	workerIdMutex        sync.Mutex
-	taskStateMutex       sync.Mutex
-	id4FileNameMutex     sync.Mutex
-	mapJobDone           atomic.Bool      //map 任务是否已完成
-	reduceJobDone        atomic.Bool      //reduce 任务是否已完成
-	reduceTaskCache      map[int][]string //用来暂存map产生的file名称（路径）
+	nReduce         int
+	nMapTask        int
+	nReduceTask     int
+	chanMap         chan chanTask
+	chanReduce      chan chanTask
+	mapTaskState    map[int]bool //正在进行中的map任务
+	reduceTaskState map[int]bool //正在进行中的reduce人物
+	workerIdMutex   sync.Mutex
+	taskStateMutex  sync.Mutex
+	taskCacheMutex  sync.Mutex
+	mapJobDone      atomic.Bool      //map 任务是否已完成
+	reduceJobDone   atomic.Bool      //reduce 任务是否已完成
+	reduceTaskCache map[int][]string //用来暂存map产生的file名称（路径）
 }
 
 var mapWorkerIdInit atomic.Int32
 var reduceWorkerIdInit atomic.Int32
 var initTaskId atomic.Int32
 
-func runTaskApply(args *ApplyTaskArgs, reply *ApplyTaskReply, c *Coordinator) {
+func (c *Coordinator) runTaskApply(args *ApplyTaskArgs, reply *ApplyTaskReply) {
 	if !c.mapJobDone.Load() {
 		select {
 		case task := <-c.chanMap:
 			reply.TaskId = task.taskId
 			reply.TaskType = MapTask
-			reply.FileNameList = append(reply.FileNameList, task.filename)
+			reply.FileNameList = append(reply.FileNameList, task.filename[0])
 			reply.WorkerId = int(mapWorkerIdInit.Load())
-			reply.nReduce = int(c.nReduce.Load())
+			reply.NReduce = c.nReduce
 			mapWorkerIdInit.Add(1)
-			c.taskStateMutex.Lock()
-			c.mapTaskState[task.taskId] = TaskState{
-				startTime: time.Now(),
-				workId:    reply.WorkerId,
-			}
-			c.taskStateMutex.Unlock()
+			go c.checkTimeOut(&task)
 		default:
 			reply.TaskType = Wait
 			reply.WorkerId = 1
@@ -114,13 +92,7 @@ func runTaskApply(args *ApplyTaskArgs, reply *ApplyTaskReply, c *Coordinator) {
 			reply.FileNameList = task.filename
 			reply.WorkerId = int(reduceWorkerIdInit.Load())
 			reduceWorkerIdInit.Add(1)
-			c.reduceTaskState[task.taskId] = TaskState{
-				startTime: time.Now(),
-				workId:    reply.WorkerId,
-			}
-			c.id4FileNameMutex.Lock()
-			c.rTaskId4FileNameList[task.taskId] = task.filename
-			c.id4FileNameMutex.Unlock()
+			go c.checkTimeOut(&task)
 		default:
 			reply.TaskType = Wait
 			reply.WorkerId = 1
@@ -128,6 +100,23 @@ func runTaskApply(args *ApplyTaskArgs, reply *ApplyTaskReply, c *Coordinator) {
 		return
 	}
 }
+
+func (c *Coordinator) checkTimeOut(task *chanTask) {
+	time.Sleep(10 * time.Second)
+	c.taskStateMutex.Lock()
+	defer c.taskStateMutex.Unlock()
+	switch task.taskType {
+	case MapTask:
+		if !c.mapTaskState[task.taskId] {
+			c.chanMap <- *task
+		}
+	case ReduceTask:
+		if !c.reduceTaskState[task.taskId] {
+			c.chanReduce <- *task
+		}
+	}
+}
+
 func getFilePath4ReduceId(filePath string) int {
 	startIndex := strings.LastIndex(filePath, "-")
 	num, _ := strconv.Atoi(filePath[startIndex+1:])
@@ -140,102 +129,75 @@ func addFilePath2TaskCache(filePath []string, c *Coordinator) {
 		c.reduceTaskCache[rTaskId] = append(c.reduceTaskCache[rTaskId], filePath)
 	}
 }
-func runTaskFinish(args *ApplyTaskArgs, reply *ApplyTaskReply, c *Coordinator) {
+func (c *Coordinator) runTaskFinish(args *ApplyTaskArgs, reply *ApplyTaskReply) {
 	switch args.TaskType {
 	case MapTask:
+		//fmt.Println("runTaskFinish MapTask: ", args)
+		c.taskCacheMutex.Lock()
 		addFilePath2TaskCache(args.FilePath, c)
+		c.taskCacheMutex.Unlock()
 
+		flag := false
 		c.taskStateMutex.Lock()
-		delete(c.mapTaskState, args.TaskId)
-		c.taskStateMutex.Unlock()
-
-		c.nTask.Add(-1)
-		if c.nTask.Load() <= 0 {
-			c.putTaskToReduce()
-			c.mapJobDone.Store(true)
+		if !c.mapTaskState[args.TaskId] {
+			c.nMapTask--
+			if c.nMapTask <= 0 {
+				c.putTaskToReduce()
+				flag = true
+			}
 		}
+		c.mapTaskState[args.TaskId] = true
+		c.taskStateMutex.Unlock()
+		c.mapJobDone.Store(flag)
+		//fmt.Println("MapTaskComplete: ", flag)
 	case ReduceTask:
+		//fmt.Println("runTaskFinish ReduceTask: ", args)
 		c.taskStateMutex.Lock()
-		delete(c.reduceTaskState, args.TaskId)
-		c.taskStateMutex.Unlock()
-
-		c.nReduce.Add(-1)
-		if c.nReduce.Load() <= 0 {
-			c.reduceJobDone.Store(true)
-		}
-	}
-}
-
-func (c *Coordinator) CheckTaskTimeOut() {
-	for {
-		c.taskStateMutex.Lock()
-		if !c.mapJobDone.Load() {
-			for k, v := range c.mapTaskState {
-				now := time.Now()
-				if now.Sub(v.startTime) >= time.Second*10 {
-					task := chanMapTask{
-						filename: c.mTaskId4FileName[k],
-						taskId:   k,
-					}
-					go func() {
-						c.chanMap <- task
-					}()
-					delete(c.mapTaskState, k)
-				}
-			}
-		} else if !c.reduceJobDone.Load() {
-			for k, v := range c.reduceTaskState {
-				now := time.Now()
-				if now.Sub(v.startTime) >= time.Second*10 {
-					task := chanReduceTask{
-						filename: c.rTaskId4FileNameList[k],
-						taskId:   k,
-					}
-					go func() {
-						c.chanReduce <- task
-					}()
-
-					delete(c.reduceTaskState, k)
-				}
+		flag := false
+		if !c.reduceTaskState[args.TaskId] {
+			c.nReduceTask--
+			if c.nReduceTask <= 0 {
+				flag = true
 			}
 		}
+		c.reduceTaskState[args.TaskId] = true
 		c.taskStateMutex.Unlock()
-		time.Sleep(time.Duration(time.Second * 5))
+		c.reduceJobDone.Store(flag)
+		//fmt.Println("ReduceTaskComplete: ", flag)
 	}
 }
 
 func (c *Coordinator) RunTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	switch args.MessageType {
 	case TaskApply:
-		runTaskApply(args, reply, c)
+		c.runTaskApply(args, reply)
 	case TaskFinish:
-		runTaskFinish(args, reply, c)
+		c.runTaskFinish(args, reply)
 	}
 	return nil
 }
 
 func (c *Coordinator) putTaskToMap(files []string) {
+	//fmt.Println("************** putTaskToMap **************")
 	for index, f := range files {
-		task := chanMapTask{
+		task := chanTask{
 			taskId:   index,
-			filename: f,
+			filename: []string{f},
+			taskType: MapTask,
 		}
-		//fmt.Println(task.taskId, task.filename)
 		c.chanMap <- task
-		c.id4FileNameMutex.Lock()
-		c.mTaskId4FileName[index] = f
-		c.id4FileNameMutex.Unlock()
 	}
 }
 func (c *Coordinator) putTaskToReduce() {
-	nReduce := int(c.nReduce.Load())
+	//fmt.Println("************** putTaskToReduce **************")
+	nReduce := int(c.nReduce)
 	for i := 0; i < nReduce; i++ {
-		task := chanReduceTask{
+		task := chanTask{
 			filename: c.reduceTaskCache[i],
 			taskId:   i,
+			taskType: ReduceTask,
 		}
 		c.chanReduce <- task
-		c.rTaskId4FileNameList[i] = task.filename
 	}
 }
 
@@ -270,14 +232,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	//fmt.Println(len(files))
 	// Your code here.
-	c.nReduce.Store(int32(nReduce))
-	c.nTask.Store(int32(len(files)))
-	c.chanMap = make(chan chanMapTask, len(files))
-	c.chanReduce = make(chan chanReduceTask, nReduce)
-	c.mapTaskState = make(map[int]TaskState)
-	c.reduceTaskState = make(map[int]TaskState)
-	c.mTaskId4FileName = make(map[int]string)
-	c.rTaskId4FileNameList = make(map[int][]string)
+	c.nReduce = nReduce
+	c.nMapTask = len(files)
+	c.nReduceTask = c.nReduce
+	c.chanMap = make(chan chanTask, len(files))
+	c.chanReduce = make(chan chanTask, nReduce)
+	c.mapTaskState = make(map[int]bool)
+	c.reduceTaskState = make(map[int]bool)
 	c.reduceTaskCache = make(map[int][]string)
 	c.mapJobDone.Store(false)
 	c.reduceJobDone.Store(false)
@@ -286,8 +247,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	initTaskId.Store(0)
 	//map 任务放入 chan
 	go c.putTaskToMap(files)
-	//检查任务有没有在指定时间内完成
-	go c.CheckTaskTimeOut()
 
 	c.server()
 	return &c
