@@ -97,25 +97,24 @@ type Raft struct {
 	nextIndex   []int
 	matchIndex  []int
 
-	timer                  *time.Timer
-	heartBeatTime          time.Duration
-	voteBasicTime          int32
-	license                licenseType
-	applyMsgChan           *chan ApplyMsg
-	hasSendLogCopyMaxIndex map[int]int
+	timer         *time.Timer
+	heartBeatTime time.Duration
+	voteBasicTime int32
+	license       licenseType
+	applyMsgChan  *chan ApplyMsg
+	//hasSendLogCopyMaxIndex map[int]int
 }
 
 type PersistRaft struct {
-	CurrentTerm            int
-	VotedFor               int
-	Log                    []Log
-	CommitIndex            int
-	LastApplied            int
-	NextIndex              []int
-	MatchIndex             []int
-	License                licenseType
-	ApplyMsgChan           *chan ApplyMsg
-	HasSendLogCopyMaxIndex map[int]int
+	CurrentTerm  int
+	VotedFor     int
+	Log          []Log
+	CommitIndex  int
+	LastApplied  int
+	NextIndex    []int
+	MatchIndex   []int
+	License      licenseType
+	ApplyMsgChan *chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -147,15 +146,15 @@ func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	persistRaft := PersistRaft{
-		CurrentTerm:            rf.currentTerm,
-		VotedFor:               rf.votedFor,
-		Log:                    rf.log,
-		CommitIndex:            rf.commitIndex,
-		LastApplied:            rf.lastApplied,
-		NextIndex:              rf.nextIndex,
-		MatchIndex:             rf.matchIndex,
-		License:                rf.license,
-		HasSendLogCopyMaxIndex: rf.hasSendLogCopyMaxIndex,
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+		Log:         rf.log,
+		CommitIndex: rf.commitIndex,
+		LastApplied: rf.lastApplied,
+		NextIndex:   rf.nextIndex,
+		MatchIndex:  rf.matchIndex,
+		License:     rf.license,
+		//HasSendLogCopyMaxIndex: rf.hasSendLogCopyMaxIndex,
 	}
 	err := e.Encode(persistRaft)
 	if err != nil {
@@ -185,7 +184,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.nextIndex = temp.NextIndex
 		rf.matchIndex = temp.MatchIndex
 		rf.license = temp.License
-		rf.hasSendLogCopyMaxIndex = temp.HasSendLogCopyMaxIndex
+		//rf.hasSendLogCopyMaxIndex = temp.HasSendLogCopyMaxIndex
 	} else {
 		panic("Decode Failed")
 	}
@@ -313,14 +312,11 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 	return ok
 }
 
-func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int) {
+func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int, index *int32) {
 	needToSend := true
 	rf.mu.Lock()
-	if rf.hasSendLogCopyMaxIndex[server] >= len(rf.log)-1 {
+	if atomic.LoadInt32(index) != int32(len(rf.log)-1) {
 		needToSend = false
-	} else {
-		rf.hasSendLogCopyMaxIndex[server] = len(rf.log) - 1
-		rf.persist()
 	}
 	rf.mu.Unlock()
 	for !rf.killed() && needToSend {
@@ -383,10 +379,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 	}
 	atomic.AddInt32(sumNum, 1)
 	if atomic.LoadInt32(agreeNum)*2 >= int32(len(rf.peers)) && !flag.Load() {
-		rf.mu.Lock()
-		temp := rf.hasSendLogCopyMaxIndex[server]
-		rf.mu.Unlock()
-		*resChan <- temp
+		*resChan <- int(atomic.LoadInt32(index))
 		flag.Store(true)
 	}
 	if atomic.LoadInt32(sumNum) >= int32(len(rf.peers)) && !flag.Load() {
@@ -401,7 +394,7 @@ func (rf *Raft) becomeLeaderInit() {
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
 	}
-	rf.hasSendLogCopyMaxIndex = make(map[int]int)
+	//rf.hasSendLogCopyMaxIndex = make(map[int]int)
 	rf.timer.Reset(0)
 	rf.persist()
 }
@@ -604,9 +597,10 @@ func (rf *Raft) logCopyReqProcess(index int) {
 		var flag atomic.Bool
 		flag.Store(false)
 		resChan := make(chan int)
+		index := int32(len(rf.log) - 1)
 		for i := range rf.peers {
 			if i != rf.me {
-				go rf.sendLogCopyRequest(i, &agreeNum, &sumNum, &flag, &resChan)
+				go rf.sendLogCopyRequest(i, &agreeNum, &sumNum, &flag, &resChan, &index)
 			}
 		}
 		res := <-resChan
@@ -686,7 +680,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
-	rf.hasSendLogCopyMaxIndex = make(map[int]int)
+	//rf.hasSendLogCopyMaxIndex = make(map[int]int)
 	rf.license = Follower
 	rf.log = append(rf.log, Log{
 		Term:    0,
