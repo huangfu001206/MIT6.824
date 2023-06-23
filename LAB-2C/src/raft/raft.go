@@ -20,6 +20,8 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"fmt"
+
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -142,7 +144,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	//fmt.Printf("(%v) : persist\n", rf.me)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	persistRaft := PersistRaft{
@@ -171,7 +172,6 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	//fmt.Printf("(%v) : readPersist\n", rf.me)
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	temp := PersistRaft{}
@@ -221,30 +221,41 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.persist()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		return
-	} else if rf.currentTerm == args.Term {
-		if rf.log[rf.commitIndex].Term > args.LastLogTerm || rf.commitIndex > args.LastLogIndex {
-			return
-		}
-	} else {
+	} else if rf.currentTerm < args.Term {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
-		rf.license = Follower
+		if rf.license != Follower {
+			rf.license = Follower
+			rf.timer.Reset(rf.heartBeatTime)
+		}
 	}
 	reply.Term = rf.currentTerm
-	if rf.votedFor == -1 {
+	moreNew := rf.upToDate(args.LastLogIndex, args.LastLogTerm)
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && moreNew {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
-	if rf.license == Follower {
-		rf.timer.Reset(rf.heartBeatTime)
+}
+
+// 自己日志更新，返回false
+// 否则返回true
+func (rf *Raft) upToDate(index int, term int) bool {
+	ownLastLogIndex := len(rf.log) - 1
+	ownLastLogTerm := rf.log[ownLastLogIndex].Term
+	if ownLastLogTerm == term {
+		if ownLastLogIndex > index {
+			return false
+		}
+	} else if ownLastLogTerm > term {
+		return false
 	}
-	return
+	return true
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -284,6 +295,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 	}
 	rf.mu.Lock()
+	//消除其他Term返回同意信息的影响
 	if reply.VoteGranted && rf.currentTerm == reply.Term {
 		atomic.AddInt32(agreeCount, 1)
 		if int(atomic.LoadInt32(agreeCount))*2 >= len(rf.peers) && rf.license == Candidate {
@@ -313,15 +325,9 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 }
 
 func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, flag *atomic.Bool, resChan *chan int, index *int32) {
-	needToSend := true
-	rf.mu.Lock()
-	if atomic.LoadInt32(index) != int32(len(rf.log)-1) {
-		needToSend = false
-	}
-	rf.mu.Unlock()
-	for !rf.killed() && needToSend {
+	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.nextIndex[server] <= 0 {
+		if rf.nextIndex[server] <= 0 || atomic.LoadInt32(index) != int32(len(rf.log)-1) {
 			rf.mu.Unlock()
 			break
 		}
@@ -333,7 +339,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			Entries:      rf.log[rf.nextIndex[server]:],
 			LeaderCommit: rf.commitIndex,
 		}
-		//fmt.Printf("(%v) : sendLogCopyRequest: %v\n", rf.me, args)
+		fmt.Printf("(%v) : sendLogCopyRequest: %v  index: %v len-1: %v\n", rf.me, args, index, len(rf.log)-1)
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{
 			Success: false,
@@ -347,7 +353,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		//fmt.Printf("reply : %v\n", reply)
+		fmt.Printf("reply : %v\n", reply)
 		if reply.Success {
 			atomic.AddInt32(agreeNum, 1)
 			rf.mu.Lock()
@@ -358,7 +364,7 @@ func (rf *Raft) sendLogCopyRequest(server int, agreeNum *int32, sumNum *int32, f
 			break
 		}
 		rf.mu.Lock()
-		//fmt.Println("reply.Index : ", reply.Index)
+		fmt.Println("reply.Index : ", reply.Index)
 		if reply.Index != -1 {
 			rf.nextIndex[server] = reply.Index
 		} else {
@@ -424,7 +430,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer func() {
 		go rf.logCopyReqProcess(index)
 	}()
-	//fmt.Printf("(%v) Start\n", rf.me)
+	fmt.Printf("(%v) Start\n", rf.me)
 	term = rf.currentTerm
 	index = len(rf.log)
 	log := Log{
@@ -432,7 +438,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
-	//fmt.Println(rf.log)
+	fmt.Println(rf.log)
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = index
 	}
@@ -473,7 +479,9 @@ func (rf *Raft) VoteProcess() {
 		reply := RequestVoteReply{}
 		args.Term = rf.currentTerm
 		args.CandidateId = rf.me
-		args.LastLogIndex = rf.commitIndex
+		//args.LastLogIndex = rf.commitIndex
+		//args.LastLogTerm = rf.log[args.LastLogIndex].Term
+		args.LastLogIndex = len(rf.log) - 1
 		args.LastLogTerm = rf.log[args.LastLogIndex].Term
 		rf.persist()
 		rf.mu.Unlock()
@@ -488,7 +496,7 @@ func (rf *Raft) VoteProcess() {
 			}
 		}
 		wg.Wait()
-		//fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, atomic.LoadInt32(&agreeCount), len(rf.peers))
+		fmt.Printf("(%v): Term = %v, agreeCount = %v, sumCount = %v \n", rf.me, rf.currentTerm, atomic.LoadInt32(&agreeCount), len(rf.peers))
 	}
 }
 func min(x int, y int) int {
@@ -507,13 +515,13 @@ func max(x int, y int) int {
 
 func (rf *Raft) ReceiveHeartBeatFromLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.currentTerm = args.Term
-	//fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
+	fmt.Printf("(%v): receive message from leader(%v) --- args.term = %v currentTerm = %v commitIndex = %v\n", rf.me, args.LeaderId, args.Term, rf.currentTerm, args.LeaderCommit)
 	rf.license = Follower
 	if args.LeaderCommit > rf.commitIndex {
 		preCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, rf.matchIndex[args.LeaderId])
 		rf.lastApplied = rf.commitIndex
-		//fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
+		fmt.Printf("(%v) commitIndex (%v)  leaderCommit: (%v)  log: %v\n", rf.me, rf.commitIndex, args.LeaderCommit, rf.log)
 
 		for i := preCommitIndex + 1; i <= rf.commitIndex; i++ {
 			rf.sendCommitMsg2ApplyCh(ApplyMsg{
@@ -547,7 +555,7 @@ func (rf *Raft) ReceiveLogCopyFromLeader(args *AppendEntriesArgs, reply *AppendE
 		rf.log = append(rf.log[0:args.PrevLogIndex+1], args.Entries...)
 		rf.matchIndex[args.LeaderId] = len(rf.log) - 1
 		rf.initNextIndex(len(rf.log))
-		//fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
+		fmt.Printf("(%v) : ReceiveLogCopyFromLeader (%v) success Log: %v\n", rf.me, args.LeaderId, rf.log)
 	}
 }
 
@@ -576,7 +584,7 @@ func (rf *Raft) HeartBeatProcess() {
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.LeaderCommit = rf.commitIndex
-		//fmt.Printf("(%v): HeartBeatProcess  leadercommit: %v\n", rf.me, rf.commitIndex)
+		fmt.Printf("(%v): HeartBeatProcess  leadercommit: %v\n", rf.me, rf.commitIndex)
 		rf.mu.Unlock()
 
 		for i := 0; i < len(rf.peers); i++ {
@@ -604,7 +612,7 @@ func (rf *Raft) logCopyReqProcess(index int) {
 			}
 		}
 		res := <-resChan
-		//fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
+		fmt.Printf("logCopyReqProcess : (%v) agreeCount: %v  sumCount: %v  res: %v\n", rf.me, agreeNum, len(rf.peers), res)
 		if res != 0 {
 			rf.mu.Lock()
 			rf.commitIndex = max(rf.commitIndex, res)
@@ -642,17 +650,17 @@ func (rf *Raft) ticker() {
 				fallthrough
 			case Candidate:
 				go rf.VoteProcess()
-				//fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
+				fmt.Printf("(%v) : currentTerm = %v  become candidate\n", rf.me, rf.currentTerm)
 			case Leader:
 				go rf.HeartBeatProcess()
-				//fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
+				fmt.Printf("(%v) : currentTerm = %v  become leader\n", rf.me, rf.currentTerm)
 			}
 		}
 	}
 }
 
 func (rf *Raft) sendCommitMsg2ApplyCh(msg ApplyMsg) {
-	//fmt.Printf("(%v) sendCommitMsg2ApplyCh  content: %v\n", rf.me, msg)
+	fmt.Printf("(%v) sendCommitMsg2ApplyCh  content: %v\n", rf.me, msg)
 	*rf.applyMsgChan <- msg
 }
 
