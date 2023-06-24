@@ -33,6 +33,7 @@ func TestInitialElection2A(t *testing.T) {
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
+	fmt.Println("***************term1: ", term1)
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
@@ -42,6 +43,7 @@ func TestInitialElection2A(t *testing.T) {
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
+		fmt.Println("**************term2: ", term2)
 	}
 
 	// there should still be a leader.
