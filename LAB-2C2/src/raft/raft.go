@@ -21,6 +21,9 @@ import (
 	"6.5840/labgob"
 	"bytes"
 	"fmt"
+	"log"
+	"os"
+
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -31,12 +34,23 @@ import (
 	"6.5840/labrpc"
 )
 
-var LOG bool = true
+var LOG bool = false
+
+func Print2File(msg string, args ...interface{}) {
+	logFile, err := os.OpenFile("output.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Println("无法创建日志文件")
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
+	log.Printf(msg, args...)
+}
 
 // DebugPrintf 日志打印函数
 func DebugPrintf(msg string, args ...interface{}) {
 	if LOG {
 		fmt.Printf(msg, args...)
+		Print2File(msg, args...)
 	}
 }
 
@@ -180,26 +194,7 @@ func (rf *Raft) isLeader() bool {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	persistRaft := PersistRaft{
-		CurrentTerm:      rf.currentTerm,
-		VotedFor:         rf.votedFor,
-		Log:              rf.log,
-		LastIncludeTerm:  rf.lastIncludeTerm,
-		LastIncludeIndex: rf.lastIncludeIndex,
-	}
-	err := e.Encode(persistRaft)
-	if err != nil {
-		panic("Encode Failed")
-	}
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
-}
-
-func (rf *Raft) persistSnapshot(snapshot []byte) {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (2C).
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -217,6 +212,25 @@ func (rf *Raft) persistSnapshot(snapshot []byte) {
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, snapshot)
 }
+
+//func (rf *Raft) persistSnapshot(snapshot []byte) {
+//	// Your code here (2C).
+//	w := new(bytes.Buffer)
+//	e := labgob.NewEncoder(w)
+//	persistRaft := PersistRaft{
+//		CurrentTerm:      rf.currentTerm,
+//		VotedFor:         rf.votedFor,
+//		Log:              rf.log,
+//		LastIncludeTerm:  rf.lastIncludeTerm,
+//		LastIncludeIndex: rf.lastIncludeIndex,
+//	}
+//	err := e.Encode(persistRaft)
+//	if err != nil {
+//		panic("Encode Failed")
+//	}
+//	raftstate := w.Bytes()
+//	rf.persister.Save(raftstate, snapshot)
+//}
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -250,12 +264,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 	rf.log = rf.log[index-rf.lastIncludeIndex:]
-	DebugPrintf("(%v) : Snapshot  index : %v  rf.log : %v\n", rf.me, index, rf.log)
+	DebugPrintf("(%v) : Snapshot  index : %v  rf.log : %v   len(snapshot) : %v \n", rf.me, index, rf.log, len(snapshot))
 	rf.lastIncludeTerm = rf.log[0].Term
 	rf.lastIncludeIndex = index
-	rf.log[0].Term = -1
-	rf.log[0].Command = "Start"
-	rf.persistSnapshot(snapshot)
+	rf.persist(snapshot)
 }
 
 // example RequestVote RPC arguments structure.
@@ -282,7 +294,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	//DebugPrintf("(%v) : RequestVote Term : %v  args: %v\n", rf.me, rf.currentTerm, *args)
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -362,13 +374,14 @@ func (rf *Raft) newTerm(term int) {
 	rf.license = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.persist()
+	rf.persist(rf.persister.ReadSnapshot())
 }
 
 // 判断谁的日志更新，若自己日志更新，返回false，否则返回true
 func (rf *Raft) upToDate(index int, term int) bool {
+	DebugPrintf("(%v) : len(rf.log) : %v, rf.lastIncludeIndex : %v \n", rf.me, len(rf.log), rf.lastIncludeIndex)
+	ownLastLogTerm := rf.log[len(rf.log)-1].Term
 	ownLastLogIndex := len(rf.log) - 1 + rf.lastIncludeIndex
-	ownLastLogTerm := rf.log[ownLastLogIndex].Term
 	//DebugPrintf("upToDate : ownLastLogIndex : %v  ownLastLogTerm : %v, args.LastLogIndex : %v , args.LastLogTerm : %v \n", ownLastLogIndex, ownLastLogTerm, index, term)
 	if ownLastLogTerm == term {
 		if ownLastLogIndex > index {
@@ -400,7 +413,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	if rf.license != Leader {
 		return -1, -1, false
 	}
@@ -490,9 +503,8 @@ func (rf *Raft) VoteProcess() {
 
 func (rf *Raft) findFirstIndexByTerm(args *AppendEntriesArgs) int {
 	var i = 0
-	DebugPrintf("(%v) : 日志不匹配, args.PrevLogIndex : %v, lastIncludeIndex : %v \n", rf.me, args.PrevLogIndex, rf.lastIncludeIndex)
 	term := rf.log[args.PrevLogIndex-rf.lastIncludeIndex].Term
-	for i = args.PrevLogIndex - rf.lastIncludeIndex - 1; rf.log[i].Term == term; i-- {
+	for i = args.PrevLogIndex - rf.lastIncludeIndex - 1; i >= 0 && rf.log[i].Term == term; i-- {
 	}
 	return i + 1
 }
@@ -501,17 +513,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DebugPrintf("(%v) ********** AppendEntries ************\n", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	DebugPrintf("(%v) : rf.log : %v, args.PrevLogIndex : %v, rf.lastIncludeIndex : %v\n", rf.me, rf.log, args.PrevLogIndex, rf.lastIncludeIndex)
 	if args.Term < rf.currentTerm {
 		//参数任期小于当前server任期，返回false
 		return
+	} else if args.Term == rf.currentTerm {
+		temp := rf.votedFor
+		rf.newTerm(args.Term)
+		rf.votedFor = temp
 	} else {
 		//参数任期大于等于当前任期，同步任期，并重置计时器
 		rf.newTerm(args.Term)
-		reply.Term = rf.currentTerm
-		rf.ResetTimer(RequestVoteTimer)
+	}
+	rf.ResetTimer(RequestVoteTimer)
+	reply.Term = rf.currentTerm
+
+	if args.PrevLogIndex < rf.lastIncludeIndex {
+		if rf.lastIncludeIndex-args.PrevLogIndex >= len(args.Entries) {
+			reply.Term = -1
+			return
+		}
+		args.Entries = args.Entries[rf.lastIncludeIndex-args.PrevLogIndex:]
+		args.PrevLogIndex = rf.lastIncludeIndex
+		args.PrevLogTerm = args.Entries[0].Term
 	}
 	if args.PrevLogIndex >= len(rf.log)+rf.lastIncludeIndex {
 		//当前日志过短
@@ -520,9 +547,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if rf.log[args.PrevLogIndex-rf.lastIncludeIndex].Term != args.PrevLogTerm {
 		//日志不匹配，返回不匹配的Term以及Term所对应的第一个Index
-		DebugPrintf("(%v) : 日志不匹配, args.PrevLogIndex : %v, lastIncludeIndex : %v \n", rf.me, args.PrevLogIndex, rf.lastIncludeIndex)
 		reply.XTerm = rf.log[args.PrevLogIndex-rf.lastIncludeIndex].Term
 		reply.XIndex = rf.findFirstIndexByTerm(args) + rf.lastIncludeIndex
+		DebugPrintf("(%v) : 日志不匹配, args.PrevLogIndex : %v, lastIncludeIndex : %v, reply.XIndex : %v, reply.XTerm : %v\n", rf.me, args.PrevLogIndex, rf.lastIncludeIndex, reply.XIndex, reply.XTerm)
 		return
 	}
 
@@ -547,7 +574,7 @@ func (rf *Raft) solveAppendEntriesReply(server int, args *AppendEntriesArgs, rep
 	DebugPrintf("(%v) ********** solveAppendEntriesReply ************\n", rf.me)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	if rf.license == Leader && rf.dead != 1 {
 		DebugPrintf("(%v) : reply.Term : %v  rf.currentTerm : %v \n", rf.me, reply.Term, rf.currentTerm)
 		if reply.Term > rf.currentTerm {
@@ -556,11 +583,14 @@ func (rf *Raft) solveAppendEntriesReply(server int, args *AppendEntriesArgs, rep
 		}
 		if reply.Term == rf.currentTerm {
 			if reply.Success == false {
+				//DebugPrintf("Reply : XLen =  \n", reply)
 				if reply.XLen != 0 {
+					DebugPrintf("reply.XLen != 0\n")
 					rf.nextIndex[server] = reply.XLen
 					return false
 				}
-				index := rf.binarySearchTerm(reply.XTerm)
+				index := rf.binarySearchTerm(reply.XTerm, args.PrevLogIndex)
+				DebugPrintf("index == %v  reply.XIndex == %v\n", index, reply.XIndex)
 				if index == -1 {
 					// 未找到相同周期的日志
 					rf.nextIndex[server] = reply.XIndex
@@ -596,21 +626,26 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 		rf.license = Follower
 		rf.ResetTimer(RequestVoteTimer)
-		//发送来的快照很老，则直接退出
+		//发送来的快照很旧，则直接退出
 		if args.LastIncludedIndex <= rf.commitIndex {
 			rf.mu.Unlock()
 			return
 		}
 		if args.LastIncludedIndex-rf.lastIncludeIndex < len(rf.log) && rf.log[args.LastIncludedIndex-rf.lastIncludeIndex].Term == args.LastIncludeTerm {
 			rf.log = rf.log[args.LastIncludedIndex-rf.lastIncludeIndex:]
-			rf.log[0].Term = -1
-			rf.log[0].Command = "Start"
+			DebugPrintf("********** here len(rf.log) : %v************\n", len(rf.log))
 		} else {
-			rf.log = []Log{{Term: -1, Command: "Start"}}
+			rf.log = []Log{
+				Log{
+					Term:    args.LastIncludeTerm,
+					Command: nil,
+				},
+			}
 		}
+		DebugPrintf("(%v) : rf.log : %v\n", rf.me, rf.log)
 		rf.lastIncludeIndex, rf.lastIncludeTerm = args.LastIncludedIndex, args.LastIncludeTerm
 		rf.commitIndex, rf.lastApplied = rf.lastIncludeIndex, rf.lastIncludeIndex
-		rf.persistSnapshot(args.Data)
+		rf.persist(args.Data)
 	}
 	rf.mu.Unlock()
 	rf.sendCommitMsg2ApplyCh(ApplyMsg{
@@ -624,7 +659,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 func (rf *Raft) solveInstallSnapshotReply(server int, args2 *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	if rf.license == Leader && rf.dead != 1 {
 		DebugPrintf("(%v) : solveInstallSnapshotReply  server---%v  args: %v\n", rf.me, server, *args2)
 		if reply.Term > rf.currentTerm {
@@ -700,6 +735,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			//InstallSnapshot
 			reply := &InstallSnapshotReply{}
 			//请求发送
+			DebugPrintf("(%v) : sendInstallSnapshot Term : %v  args : %v\n", rf.me, rf.currentTerm, *args2)
 			ok := rf.peers[server].Call("Raft.InstallSnapshot", args2, reply)
 			for !ok && rf.isLeader() {
 				time.Sleep(5 * time.Millisecond)
@@ -717,7 +753,7 @@ func (rf *Raft) AppendEntriesProcess() {
 		DebugPrintf("(%v) ********** AppendEntriesProcess ************\n", rf.me)
 		rf.mu.Lock()
 		rf.ResetTimer(AppendEntriesTimer)
-		rf.persist()
+		rf.persist(rf.persister.ReadSnapshot())
 		rf.mu.Unlock()
 		//向每个服务器发送AppendEntries RPC
 		for i := 0; i < len(rf.peers); i++ {
@@ -733,7 +769,7 @@ func (rf *Raft) becomeCandidateInit() {
 	rf.license = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.persist()
+	rf.persist(rf.persister.ReadSnapshot())
 	rf.ResetTimer(RequestVoteTimer)
 }
 
@@ -745,11 +781,11 @@ func (rf *Raft) becomeLeaderInit() {
 		rf.nextIndex[i] = len(rf.log) + rf.lastIncludeIndex
 	}
 	rf.timer.Reset(0)
-	rf.persist()
+	rf.persist(rf.persister.ReadSnapshot())
 }
 
 func (rf *Raft) ResetTimer(types timerType) {
-	defer rf.persist()
+	defer rf.persist(rf.persister.ReadSnapshot())
 	switch types {
 	case RequestVoteTimer:
 		//DebugPrintf("(%v) : resetTimer---RequestVoteTimer, Term : %v\n", rf.me, rf.currentTerm)
@@ -772,7 +808,7 @@ func (rf *Raft) commitIndexCheck() {
 	if index != -1 {
 		rf.commitIndex = index
 		rf.timer.Reset(0)
-		rf.persist()
+		rf.persist(rf.persister.ReadSnapshot())
 		rf.ApplyMsgCond.Signal()
 	}
 }
@@ -800,26 +836,59 @@ func (rf *Raft) needToApply() bool {
 	return rf.commitIndex > rf.lastApplied
 }
 
+func (rf *Raft) commit2ApplyCh() {
+
+	rf.ApplyMsgCond.L.Lock()
+	defer rf.ApplyMsgCond.L.Unlock()
+
+	for rf.killed() == false {
+		rf.ApplyMsgCond.Wait()
+		//进行日志提交
+		DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		rf.mu.Lock()
+		start := rf.lastApplied + 1
+		applyEntries := make([]Log, rf.commitIndex-rf.lastApplied)
+		commitIndex := rf.commitIndex
+		copy(applyEntries, rf.log[rf.lastApplied-rf.lastIncludeIndex+1:rf.commitIndex-rf.lastIncludeIndex+1])
+		rf.mu.Unlock()
+
+		for i := 0; i < len(applyEntries); i++ {
+			rf.sendCommitMsg2ApplyCh(ApplyMsg{
+				CommandValid: true,
+				Command:      applyEntries[i].Command,
+				CommandIndex: i + start,
+			})
+		}
+		rf.mu.Lock()
+		rf.lastApplied = max(rf.lastApplied, commitIndex)
+		rf.persist(rf.persister.ReadSnapshot())
+		rf.mu.Unlock()
+	}
+}
+
 //	func (rf *Raft) commit2ApplyCh() {
+//		rf.ApplyMsgCond.L.Lock()
+//		defer rf.ApplyMsgCond.L.Unlock()
 //		for rf.killed() == false {
-//			rf.ApplyMsgCond.L.Lock()
-//			for !rf.needToApply() {
-//				rf.ApplyMsgCond.Wait()
-//			}
-//			//进行日志提交
+//			rf.ApplyMsgCond.Wait()
 //			DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+//			//进行日志提交
 //			rf.mu.Lock()
 //			start := rf.lastApplied + 1
-//			applyEntries := make([]Log, rf.commitIndex-rf.lastApplied)
-//			copy(applyEntries, rf.log[rf.lastApplied-rf.lastIncludeIndex+1:rf.commitIndex-rf.lastIncludeIndex+1])
+//			end := rf.commitIndex
+//			logLen := len(rf.log)
+//			lastIncludeIndex := rf.lastIncludeIndex
+//			log := rf.log
 //			rf.mu.Unlock()
-//
-//			for i := 0; i < len(applyEntries); i++ {
-//				rf.sendCommitMsg2ApplyCh(ApplyMsg{
-//					CommandValid: true,
-//					Command:      applyEntries[i].Command,
-//					CommandIndex: i + start,
-//				})
+//			for i := start; i <= end; i++ {
+//				if i-lastIncludeIndex >= 1 && i-lastIncludeIndex < logLen {
+//					DebugPrintf("i : %v i - lastIncludeIndex =  %v  logLen = %v\n", i, i-lastIncludeIndex, logLen)
+//					rf.sendCommitMsg2ApplyCh(ApplyMsg{
+//						CommandValid: true,
+//						Command:      log[i-lastIncludeIndex].Command,
+//						CommandIndex: i,
+//					})
+//				}
 //			}
 //			rf.mu.Lock()
 //			rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
@@ -827,40 +896,10 @@ func (rf *Raft) needToApply() bool {
 //			rf.mu.Unlock()
 //		}
 //	}
-func (rf *Raft) commit2ApplyCh() {
-	rf.ApplyMsgCond.L.Lock()
-	defer rf.ApplyMsgCond.L.Unlock()
-	for rf.killed() == false {
-		rf.ApplyMsgCond.Wait()
-		DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-		//进行日志提交
-		rf.mu.Lock()
-		start := rf.lastApplied + 1
-		end := rf.commitIndex
-		logLen := len(rf.log)
-		lastIncludeIndex := rf.lastIncludeIndex
-		log := rf.log
-		rf.mu.Unlock()
-		for i := start; i <= end; i++ {
-			if i-lastIncludeIndex >= 1 && i-lastIncludeIndex < logLen {
-				DebugPrintf("i : %v i - lastIncludeIndex =  %v  logLen = %v\n", i, i-lastIncludeIndex, logLen)
-				rf.sendCommitMsg2ApplyCh(ApplyMsg{
-					CommandValid: true,
-					Command:      log[i-lastIncludeIndex].Command,
-					CommandIndex: i,
-				})
-			}
-		}
-		rf.mu.Lock()
-		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
-		rf.persist()
-		rf.mu.Unlock()
-	}
-}
-func (rf *Raft) binarySearchTerm(term int) int {
-	DebugPrintf("******binarySearchTerm : len(rf.log) = %v*****\n", len(rf.log))
+func (rf *Raft) binarySearchTerm(term int, prevLogIndex int) int {
+	DebugPrintf("******binarySearchTerm : len(rf.log) = %v  prevLogIndex : %v *****\n", len(rf.log), prevLogIndex)
 	left := 0
-	right := len(rf.log) - 1
+	right := prevLogIndex - rf.lastIncludeIndex
 	for left < right {
 		mid := (left + right + 1) / 2
 		tempTerm := rf.log[mid].Term

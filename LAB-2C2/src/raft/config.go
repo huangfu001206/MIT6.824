@@ -144,6 +144,9 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
+			DebugPrintf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			DebugPrintf("commit index=%v server=%v %v != server=%v %v",
+				m.CommandIndex, i, m.Command, j, old)
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
@@ -591,6 +594,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
+				DebugPrintf("one(%v) failed to reach agreement", cmd)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -598,6 +602,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 	}
 	if cfg.checkFinished() == false {
+		DebugPrintf("one(%v) failed to reach agreement", cmd)
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
