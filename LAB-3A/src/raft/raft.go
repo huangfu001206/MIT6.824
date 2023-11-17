@@ -213,25 +213,6 @@ func (rf *Raft) persist(snapshot []byte) {
 	rf.persister.Save(raftstate, snapshot)
 }
 
-//func (rf *Raft) persistSnapshot(snapshot []byte) {
-//	// Your code here (2C).
-//	w := new(bytes.Buffer)
-//	e := labgob.NewEncoder(w)
-//	persistRaft := PersistRaft{
-//		CurrentTerm:      rf.currentTerm,
-//		VotedFor:         rf.votedFor,
-//		Log:              rf.log,
-//		LastIncludeTerm:  rf.lastIncludeTerm,
-//		LastIncludeIndex: rf.lastIncludeIndex,
-//	}
-//	err := e.Encode(persistRaft)
-//	if err != nil {
-//		panic("Encode Failed")
-//	}
-//	raftstate := w.Bytes()
-//	rf.persister.Save(raftstate, snapshot)
-//}
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -865,37 +846,6 @@ func (rf *Raft) commit2ApplyCh() {
 		rf.mu.Unlock()
 	}
 }
-
-//	func (rf *Raft) commit2ApplyCh() {
-//		rf.ApplyMsgCond.L.Lock()
-//		defer rf.ApplyMsgCond.L.Unlock()
-//		for rf.killed() == false {
-//			rf.ApplyMsgCond.Wait()
-//			DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-//			//进行日志提交
-//			rf.mu.Lock()
-//			start := rf.lastApplied + 1
-//			end := rf.commitIndex
-//			logLen := len(rf.log)
-//			lastIncludeIndex := rf.lastIncludeIndex
-//			log := rf.log
-//			rf.mu.Unlock()
-//			for i := start; i <= end; i++ {
-//				if i-lastIncludeIndex >= 1 && i-lastIncludeIndex < logLen {
-//					DebugPrintf("i : %v i - lastIncludeIndex =  %v  logLen = %v\n", i, i-lastIncludeIndex, logLen)
-//					rf.sendCommitMsg2ApplyCh(ApplyMsg{
-//						CommandValid: true,
-//						Command:      log[i-lastIncludeIndex].Command,
-//						CommandIndex: i,
-//					})
-//				}
-//			}
-//			rf.mu.Lock()
-//			rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
-//			rf.persist()
-//			rf.mu.Unlock()
-//		}
-//	}
 func (rf *Raft) binarySearchTerm(term int, prevLogIndex int) int {
 	DebugPrintf("******binarySearchTerm : len(rf.log) = %v  prevLogIndex : %v *****\n", len(rf.log), prevLogIndex)
 	left := 0
