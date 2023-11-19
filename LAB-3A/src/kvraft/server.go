@@ -57,22 +57,35 @@ type KVServer struct {
 	timeout        time.Duration         //超时时间
 	data           map[string]string
 }
+type Method int
 
-func (kv *KVServer) GetFinishedResponse(clerkId int64, reply *GetReply) {
+const (
+	GET Method = iota
+	Put
+	Append
+)
+
+func (kv *KVServer) GetNewestFinishedTask(method Method, clerkId int64, reply interface{}) {
 	//（这里始终返回最大请求号对应的回复，因为对于每个client来说，重新发送的请求对应的结果一定是之前最新的一个请求）
-	reply.Err = OK
-	reply.Value = kv.hasFinishedReq[clerkId].reply
+	switch method {
+	case GET:
+		reply.(*GetReply).Err = OK
+		reply.(*GetReply).Value = kv.hasFinishedReq[clerkId].reply
+	default:
+		reply.(*GetReply).Err = OK
+	}
 }
 
-func (kv *KVServer) WaitingForApplyChanReply(args *GetArgs, reply *GetReply, index int) {
+func (kv *KVServer) WaitingForApplyChanReply(method Method, args interface{}, reply interface{}, index int) {
 	done := make(chan string)
+	clerkId, seq, _ := kv.getArgsAttr(method, args)
 	go func() {
 		for {
 			kv.applyChanCond.Wait()
-			_, isFinishExist := kv.hasFinishedReq[args.ClerkId]
-			if isFinishExist && kv.hasFinishedReq[args.ClerkId].index == index {
-				if kv.hasFinishedReq[args.ClerkId].seq == args.Seq {
-					done <- kv.hasFinishedReq[args.ClerkId].reply
+			_, isFinishExist := kv.hasFinishedReq[clerkId]
+			if isFinishExist && kv.hasFinishedReq[clerkId].index == index {
+				if kv.hasFinishedReq[clerkId].seq == seq {
+					done <- kv.hasFinishedReq[clerkId].reply
 				} else {
 					done <- ErrNoKey
 				}
@@ -83,82 +96,122 @@ func (kv *KVServer) WaitingForApplyChanReply(args *GetArgs, reply *GetReply, ind
 	select {
 	case res := <-done:
 		if res == ErrNoKey {
-			reply.Err = ErrNoKey
-			reply.Value = ""
+			kv.setReplyErr(method, reply, ErrNoKey)
 		} else {
-			reply.Err = OK
-			reply.Value = res
+			kv.setReplyErr(method, reply, OK)
+			if method == GET {
+				reply.(*GetReply).Value = res
+			}
 		}
 	case <-time.After(kv.timeout):
-		reply.Err = Timeout
+		kv.setReplyErr(method, reply, Timeout)
 	}
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+// DoubleLockCheckIsLeader 本函数确实难以复用，但是写在一个函数中过于冗余
+func (kv *KVServer) DoubleLockCheckIsLeader() bool {
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
+		return false
 	}
 	kv.mu.Lock()
 	//双检锁，为了避免拿到锁后，已经不是leader了
 	_, isLeader = kv.rf.GetState()
 	if !isLeader {
-		reply.Err = ErrWrongLeader
+		return false
+	}
+	return true
+}
+
+func (kv *KVServer) setReplyErr(method Method, reply interface{}, err Err) {
+	switch method {
+	case GET:
+		reply.(*GetReply).Err = err
+	default:
+		reply.(*PutAppendReply).Err = err
+	}
+}
+
+func (kv *KVServer) getArgsAttr(method Method, args interface{}) (clerkId int64, seq int32, key string) {
+	switch method {
+	case GET:
+		temp := args.(*GetArgs)
+		clerkId = temp.ClerkId
+		seq = temp.Seq
+		key = temp.Key
+	default:
+		temp := args.(*PutAppendArgs)
+		clerkId = temp.ClerkId
+		seq = temp.Seq
+		key = temp.Key
+	}
+	return clerkId, seq, key
+}
+
+func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, method Method) {
+	// Your code here.
+	if !kv.DoubleLockCheckIsLeader() {
+		kv.setReplyErr(method, reply, ErrWrongLeader)
+		kv.mu.Unlock()
 		return
 	}
+	//获取参数信息
+	clerkId, seq, key := kv.getArgsAttr(method, args)
 	//判断当前客户端有没有请求过
-	_, hasRequested := kv.hasReqSeq[args.ClerkId]
+	_, hasRequested := kv.hasReqSeq[clerkId]
 	if !hasRequested {
-		kv.hasReqSeq[args.ClerkId] = SeqAndIndex{
-			seq:   args.Seq - 1,
+		kv.hasReqSeq[clerkId] = SeqAndIndex{
+			seq:   seq - 1,
 			index: -1,
 		}
 	}
 	//用来标记当前请求是否正在执行/过期请求/新的请求
-	isProcessing := kv.hasReqSeq[args.ClerkId].seq == args.Seq
-	isExpired := kv.hasReqSeq[args.ClerkId].seq > args.Seq
-	isNewReq := kv.hasReqSeq[args.ClerkId].seq < args.Seq
+	isProcessing := kv.hasReqSeq[clerkId].seq == seq
+	isExpired := kv.hasReqSeq[clerkId].seq > seq
+	isNewReq := kv.hasReqSeq[clerkId].seq < seq
 	if isExpired {
 		//请求过时,直接返回最新的执行结果即可
-		kv.GetFinishedResponse(args.ClerkId, reply)
+		kv.GetNewestFinishedTask(method, clerkId, reply)
 		kv.mu.Unlock()
 		return
 	} else if isProcessing {
 		//请求正在执行或者执行完毕
-		_, isExistFinished := kv.hasFinishedReq[args.ClerkId]
-		if !isExistFinished || kv.hasFinishedReq[args.ClerkId].seq < args.Seq {
+		_, isExistFinished := kv.hasFinishedReq[clerkId]
+		if !isExistFinished || kv.hasFinishedReq[clerkId].seq < seq {
 			//请求未执行完毕，但是正在执行中，那么就没必要发送Start请求，仅仅需要等待即可
-			kv.WaitingForApplyChanReply(args, reply, kv.hasReqSeq[args.ClerkId].index)
+			kv.WaitingForApplyChanReply(method, args, reply, kv.hasReqSeq[clerkId].index)
 		} else {
 			//请求已经执行完毕，返回执行结果即可
-			kv.GetFinishedResponse(args.ClerkId, reply)
+			kv.GetNewestFinishedTask(method, clerkId, reply)
 			kv.mu.Unlock()
 			return
 		}
 	} else if isNewReq {
 		//请求并未出现过，即新的请求
-		key := args.Key
 		kv.mu.Unlock()
-		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: "Get", Key: key, Value: "", Seq: args.Seq})
+		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: "Get", Key: key, Value: "", Seq: seq})
 		if !isLeader {
-			reply.Err = ErrWrongLeader
+			kv.setReplyErr(method, reply, ErrWrongLeader)
 			return
 		}
 		kv.mu.Lock()
-		kv.hasReqSeq[args.ClerkId] = SeqAndIndex{
-			seq:   args.Seq,
+		kv.hasReqSeq[clerkId] = SeqAndIndex{
+			seq:   seq,
 			index: chanIndex,
 		}
-		kv.WaitingForApplyChanReply(args, reply, chanIndex)
+		kv.WaitingForApplyChanReply(method, args, reply, chanIndex)
 		kv.mu.Unlock()
 		return
 	}
+
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.GetAndPutAppendHandler(args, reply, GET)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.GetAndPutAppendHandler(args, reply, Put)
 }
 
 // the tester calls Kill() when a KVServer instance won't
