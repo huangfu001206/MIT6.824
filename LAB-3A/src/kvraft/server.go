@@ -10,11 +10,12 @@ import (
 	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
+		//raft.Print2File(format, a...)
 	}
 	return
 }
@@ -57,44 +58,48 @@ type KVServer struct {
 	timeout        time.Duration         //超时时间
 	data           map[string]string
 }
-type Method int
 
-const (
-	GET Method = iota
-	Put
-	Append
-)
-
-func (kv *KVServer) GetNewestFinishedTask(method Method, clerkId int64, reply interface{}) {
+func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply interface{}) {
 	//（这里始终返回最大请求号对应的回复，因为对于每个client来说，重新发送的请求对应的结果一定是之前最新的一个请求）
 	switch method {
 	case GET:
 		reply.(*GetReply).Err = OK
 		reply.(*GetReply).Value = kv.hasFinishedReq[clerkId].reply
 	default:
-		reply.(*GetReply).Err = OK
+		reply.(*PutAppendReply).Err = OK
 	}
 }
 
-func (kv *KVServer) WaitingForApplyChanReply(method Method, args interface{}, reply interface{}, index int) {
+func (kv *KVServer) WaitingForApplyChanReply(method string, args interface{}, reply interface{}, index int) {
+	DPrintf("Server-WaitingForApplyChanReply: index : %v\n", index)
 	done := make(chan string)
-	clerkId, seq, _ := kv.getArgsAttr(method, args)
+	clerkId, seq, _, _ := kv.getArgsAttr(method, args)
 	go func() {
 		for {
+			DPrintf("(%v) : Server-WaitingForApplyChanReply : start waiting\n", kv.me)
 			kv.applyChanCond.Wait()
+			DPrintf("(%v) : Server-WaitingForApplyChanReply : apply get result success\n", kv.me)
 			_, isFinishExist := kv.hasFinishedReq[clerkId]
-			if isFinishExist && kv.hasFinishedReq[clerkId].index == index {
-				if kv.hasFinishedReq[clerkId].seq == seq {
-					done <- kv.hasFinishedReq[clerkId].reply
-				} else {
+			//DPrintf("(%v) : isFinishExist : %v, index : %v, ClientId : %v\n", kv.me, isFinishExist, kv.hasFinishedReq[clerkId].index, clerkId)
+			if isFinishExist {
+				DPrintf("kv.hasFinishedReq[clerkId].index == index (%v) ; kv.hasFinishedReq[clerkId].seq == seq (%v)", kv.hasFinishedReq[clerkId].index == index, kv.hasFinishedReq[clerkId].seq == seq)
+				if kv.hasFinishedReq[clerkId].index == index {
+					if kv.hasFinishedReq[clerkId].seq == seq {
+						done <- kv.hasFinishedReq[clerkId].reply
+					} else {
+						done <- ErrNoKey
+					}
+					return
+				} else if kv.hasFinishedReq[clerkId].index > index {
 					done <- ErrNoKey
+					return
 				}
-				return
 			}
 		}
 	}()
 	select {
 	case res := <-done:
+		DPrintf("Server-WaitingForApplyChanReply: res : %v\n", res)
 		if res == ErrNoKey {
 			kv.setReplyErr(method, reply, ErrNoKey)
 		} else {
@@ -104,26 +109,12 @@ func (kv *KVServer) WaitingForApplyChanReply(method Method, args interface{}, re
 			}
 		}
 	case <-time.After(kv.timeout):
+		DPrintf("(%v) : Server-WaitingForApplyChanReply: timeout\n", kv.me)
 		kv.setReplyErr(method, reply, Timeout)
 	}
 }
 
-// DoubleLockCheckIsLeader 本函数确实难以复用，但是写在一个函数中过于冗余
-func (kv *KVServer) DoubleLockCheckIsLeader() bool {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		return false
-	}
-	kv.mu.Lock()
-	//双检锁，为了避免拿到锁后，已经不是leader了
-	_, isLeader = kv.rf.GetState()
-	if !isLeader {
-		return false
-	}
-	return true
-}
-
-func (kv *KVServer) setReplyErr(method Method, reply interface{}, err Err) {
+func (kv *KVServer) setReplyErr(method string, reply interface{}, err Err) {
 	switch method {
 	case GET:
 		reply.(*GetReply).Err = err
@@ -132,31 +123,42 @@ func (kv *KVServer) setReplyErr(method Method, reply interface{}, err Err) {
 	}
 }
 
-func (kv *KVServer) getArgsAttr(method Method, args interface{}) (clerkId int64, seq int32, key string) {
+func (kv *KVServer) getArgsAttr(method string, args interface{}) (clerkId int64, seq int32, key string, value string) {
 	switch method {
 	case GET:
 		temp := args.(*GetArgs)
 		clerkId = temp.ClerkId
 		seq = temp.Seq
 		key = temp.Key
+		value = ""
 	default:
 		temp := args.(*PutAppendArgs)
 		clerkId = temp.ClerkId
 		seq = temp.Seq
 		key = temp.Key
+		value = temp.Value
 	}
-	return clerkId, seq, key
+	return clerkId, seq, key, value
 }
 
-func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, method Method) {
+func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, method string) {
 	// Your code here.
-	if !kv.DoubleLockCheckIsLeader() {
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		kv.setReplyErr(method, reply, ErrWrongLeader)
+		return
+	}
+	kv.mu.Lock()
+	//双检锁，为了避免拿到锁后，已经不是leader了
+	_, isLeader = kv.rf.GetState()
+	if !isLeader {
 		kv.setReplyErr(method, reply, ErrWrongLeader)
 		kv.mu.Unlock()
 		return
 	}
+	DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
 	//获取参数信息
-	clerkId, seq, key := kv.getArgsAttr(method, args)
+	clerkId, seq, key, value := kv.getArgsAttr(method, args)
 	//判断当前客户端有没有请求过
 	_, hasRequested := kv.hasReqSeq[clerkId]
 	if !hasRequested {
@@ -170,16 +172,20 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	isExpired := kv.hasReqSeq[clerkId].seq > seq
 	isNewReq := kv.hasReqSeq[clerkId].seq < seq
 	if isExpired {
+		DPrintf("Server: request isExpired\n")
 		//请求过时,直接返回最新的执行结果即可
 		kv.GetNewestFinishedTask(method, clerkId, reply)
 		kv.mu.Unlock()
 		return
 	} else if isProcessing {
+		DPrintf("Server: request isProcessing\n")
 		//请求正在执行或者执行完毕
 		_, isExistFinished := kv.hasFinishedReq[clerkId]
 		if !isExistFinished || kv.hasFinishedReq[clerkId].seq < seq {
 			//请求未执行完毕，但是正在执行中，那么就没必要发送Start请求，仅仅需要等待即可
 			kv.WaitingForApplyChanReply(method, args, reply, kv.hasReqSeq[clerkId].index)
+			kv.mu.Unlock()
+			return
 		} else {
 			//请求已经执行完毕，返回执行结果即可
 			kv.GetNewestFinishedTask(method, clerkId, reply)
@@ -187,9 +193,10 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 			return
 		}
 	} else if isNewReq {
+		DPrintf("Server: request isNewReq\n")
 		//请求并未出现过，即新的请求
 		kv.mu.Unlock()
-		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: "Get", Key: key, Value: "", Seq: seq})
+		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: method, Key: key, Value: value, Seq: seq, ClientId: clerkId})
 		if !isLeader {
 			kv.setReplyErr(method, reply, ErrWrongLeader)
 			return
@@ -207,11 +214,14 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	DPrintf("****** Server-Get *********\n")
 	kv.GetAndPutAppendHandler(args, reply, GET)
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.GetAndPutAppendHandler(args, reply, Put)
+	DPrintf("****** Server-PutAppend *********\n")
+	kv.GetAndPutAppendHandler(args, reply, args.Op)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -263,8 +273,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// 初始化
 	kv.hasFinishedReq = make(map[int64]SeqAndReply)
 	kv.hasReqSeq = make(map[int64]SeqAndIndex)
-	kv.timeout = 100 * time.Millisecond
-	kv.applyChanCond = sync.NewCond(&sync.Mutex{})
+	kv.data = make(map[string]string)
+	kv.timeout = 500 * time.Millisecond
+	kv.applyChanCond = sync.NewCond(&kv.mu)
 
 	//将applyChan中的已经完成的任务取出，并放置在队列中
 	go kv.checkApplyChan()
@@ -281,20 +292,28 @@ func (kv *KVServer) checkApplyChan() {
 		kv.mu.Lock()
 		index := task.CommandIndex
 		content := task.Command.(Op)
+		DPrintf("(%v): ------ checkApplyChan task %v complete --------\n", kv.me, task)
+		DPrintf("------------- method : %v ---------------\n", content.OpType)
+		DPrintf("------------- key : %v ---------------\n", content.Key)
+		DPrintf("------------- value : %v ---------------\n", content.Value)
+		DPrintf("------------- clientId : %v ---------------\n", content.ClientId)
+		DPrintf("------------- seq : %v ---------------\n", content.Seq)
+		//DPrintf("-------------------------------------------------------\n")
+
 		_, isFinishedExist := kv.hasFinishedReq[content.ClientId]
-		if isFinishedExist && kv.hasFinishedReq[content.ClientId].seq < content.Seq {
+		if !isFinishedExist || isFinishedExist && kv.hasFinishedReq[content.ClientId].seq < content.Seq {
 			reply := ""
 			switch content.OpType {
-			case "Get":
+			case GET:
 				_, exist := kv.data[content.Key]
 				if !exist {
 					reply = ErrNoKey
 				} else {
 					reply = kv.data[content.Key]
 				}
-			case "Put":
+			case PUT:
 				kv.data[content.Key] = content.Value
-			case "Append":
+			case APPEND:
 				kv.data[content.Key] += content.Value
 			}
 			kv.hasFinishedReq[content.ClientId] = SeqAndReply{
@@ -304,7 +323,8 @@ func (kv *KVServer) checkApplyChan() {
 				reply:    reply,
 			}
 		}
+		kv.applyChanCond.Signal()
+		//DPrintf("(%v) : ----------- Broadcast ----------- \n", kv.me)
 		kv.mu.Unlock()
-		kv.applyChanCond.Broadcast()
 	}
 }

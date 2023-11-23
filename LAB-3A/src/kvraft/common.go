@@ -8,6 +8,12 @@ const (
 	Repeat         = "Repeat"
 )
 
+const (
+	GET    string = "Get"
+	PUT    string = "Put"
+	APPEND string = "Append"
+)
+
 type Err string
 
 // Put or Append

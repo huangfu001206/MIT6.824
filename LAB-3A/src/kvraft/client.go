@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"6.5840/labrpc"
-	"sync/atomic"
 )
 import "crypto/rand"
 import "math/big"
@@ -20,9 +19,9 @@ type GetRespType struct {
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	seq             atomic.Int32 //标记最新的请求序号
-	clerkId         int64        // 用拉标记自身的唯一id
-	leaderIndex     int          //用于标记上一个请求的对象索引（大概率为leader）
+	seq             int32 //标记最新的请求序号
+	clerkId         int64 // 用拉标记自身的唯一id
+	leaderIndex     int   //用于标记上一个请求的对象索引（大概率为leader）
 	timeoutDuration time.Duration
 }
 
@@ -38,9 +37,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.clerkId = nrand()
-	ck.seq.Store(0)
+	ck.seq = 0
 	ck.leaderIndex = -1
-	ck.timeoutDuration = 5 * time.Second
+	ck.timeoutDuration = 1 * time.Second
 	return ck
 }
 
@@ -55,7 +54,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
+	DPrintf("Client-Get : key : %v, op : %v\n", key, "Get")
 	// You will have to modify this function.
 	if ck.leaderIndex == -1 {
 		ck.leaderIndex = 0
@@ -63,47 +62,23 @@ func (ck *Clerk) Get(key string) string {
 	numServer := len(ck.servers)
 	args := GetArgs{
 		Key:     key,
-		Seq:     ck.seq.Load(),
+		Seq:     ck.seq,
 		ClerkId: ck.clerkId,
 	}
 	reply := GetReply{}
 	for {
-		msgChan := make(chan GetRespType)
-		go ck.sendGetReq(&args, &reply, ck.leaderIndex, msgChan)
-		select {
-		case msg := <-msgChan:
-			switch msg.status {
-			case OK:
-				ck.seq.Store(ck.seq.Load() + 1)
-				return msg.context
+		ok := ck.servers[ck.leaderIndex].Call("KVServer.Get", &args, &reply)
+		if ok {
+			DPrintf("Client-PutAppend : reply : %v", reply)
+			if reply.Err == OK {
+				ck.seq++
+				return reply.Value
+			} else if reply.Err == ErrNoKey {
+				ck.seq++
+				return ""
 			}
-		case <-time.After(ck.timeoutDuration):
-
 		}
 		ck.leaderIndex = (ck.leaderIndex + 1) % numServer
-	}
-}
-
-func (ck *Clerk) sendGetReq(args *GetArgs, reply *GetReply, leaderIndex int, msgChan chan GetRespType) {
-	ok := ck.servers[leaderIndex].Call("KVServer.Get", &args, &reply)
-	if !ok {
-		msgChan <- GetRespType{
-			status: Failed,
-		}
-	} else {
-		msgChan <- GetRespType{
-			status:  string(reply.Err),
-			context: reply.Value,
-		}
-	}
-}
-
-func (ck *Clerk) sendPutReq(args *PutAppendArgs, reply *PutAppendReply, leaderIndex int, msgChan chan string) {
-	ok := ck.servers[leaderIndex].Call("KVServer.PutAppend", &args, &reply)
-	if !ok {
-		msgChan <- Failed
-	} else {
-		msgChan <- string(reply.Err)
 	}
 }
 
@@ -116,6 +91,9 @@ func (ck *Clerk) sendPutReq(args *PutAppendArgs, reply *PutAppendReply, leaderIn
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+
+	DPrintf("Client-PutAppend : key : %v, value : %v, op : %v\n", key, value, op)
+
 	// You will have to modify this function.
 	if ck.leaderIndex == -1 {
 		ck.leaderIndex = 0
@@ -127,30 +105,25 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value:   value,
 		Op:      op,
 		ClerkId: ck.clerkId,
-		Seq:     ck.seq.Load(),
+		Seq:     ck.seq,
 	}
 	reply := PutAppendReply{}
 	for {
-		msgChan := make(chan string)
-		//异步发送Put Rpc请求
-		go ck.sendPutReq(&args, &reply, ck.leaderIndex, msgChan)
-		//接收结果及超时检测
-		select {
-		case msg := <-msgChan:
-			if msg == OK {
-				ck.seq.Store(ck.seq.Load() + 1)
-				return
-			}
-		case <-time.After(ck.timeoutDuration):
-			DPrintf("(%v) : PutAppend Timeout", ck.clerkId)
+		ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply)
+		DPrintf("Client-PutAppend : reply : %v", reply)
+		if ok && reply.Err == OK {
+			ck.seq++
+			return
 		}
 		ck.leaderIndex = (ck.leaderIndex + 1) % numServer
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	DPrintf("Client-Put: key : %v , value : %v\n", key, value)
+	ck.PutAppend(key, value, PUT)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	DPrintf("Client-Append: key : %v , value : %v\n", key, value)
+	ck.PutAppend(key, value, APPEND)
 }
