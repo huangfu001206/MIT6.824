@@ -288,7 +288,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	newer := rf.upToDate(args.LastLogIndex, args.LastLogTerm)
 	reply.VoteGranted = false
 	//这里rf.votefor == args.CandidateId 是为了避免如下情况：
-	//当Candidate发起投票，自己接收到，经过判断同意投票，并返回同意信息，但这个信息在返回途中丢失了，那么其实Cadidate会再次发起投票（仅仅针对未回复的）
+	//当Candidate发起投票，自己接收到，经过判断同意投票，并返回同意信息，但这个信息在返回途中丢失了，那么其实Candidate会再次发起投票（仅仅针对未回复的）
 	//此时，votedFor 是 args.CandidateId,那么也得同意
 	//这里并不会导致重复同意，因为回复同意的消息收到后，Candidate在本Term中将不会再次发起投票请求
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && newer {
@@ -394,10 +394,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist(rf.persister.ReadSnapshot())
 	if rf.license != Leader {
 		return -1, -1, false
 	}
+	// *** 加速日志拷贝 *******  效果十分显著
+	defer rf.timer.Reset(0)
+	defer rf.persist(rf.persister.ReadSnapshot())
 	isLeader = true
 	index = len(rf.log) + rf.lastIncludeIndex
 	term = rf.currentTerm
@@ -658,9 +660,9 @@ func (rf *Raft) solveInstallSnapshotReply(server int, args2 *InstallSnapshotArgs
 // prepareAppendEntriesArgs 准备AppendEntries所需参数
 func (rf *Raft) prepareAppendEntriesArgs(server int) (bool, *AppendEntriesArgs, *InstallSnapshotArgs) {
 	DebugPrintf("(%v) ********** prepareAppendEntriesArgs ************\n", rf.me)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.license == Leader && rf.dead != 1 {
+	if rf.isLeader() && !rf.killed() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if rf.nextIndex[server] <= 0 {
 			return false, nil, nil
 		}
@@ -825,7 +827,7 @@ func (rf *Raft) commit2ApplyCh() {
 	for rf.killed() == false {
 		rf.ApplyMsgCond.Wait()
 		//进行日志提交
-		DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		//DebugPrintf("(%v) : commit2ApplyCh Term : %v  lastApplied : %v  commitIndex : %v\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 		rf.mu.Lock()
 		start := rf.lastApplied + 1
 		applyEntries := make([]Log, rf.commitIndex-rf.lastApplied)

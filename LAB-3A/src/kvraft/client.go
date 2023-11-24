@@ -73,7 +73,7 @@ func (ck *Clerk) Get(key string) string {
 			if reply.Err == OK {
 				ck.seq++
 				return reply.Value
-			} else if reply.Err == ErrNoKey {
+			} else if reply.Err == ErrNoKey || reply.Err == Repeat {
 				ck.seq++
 				return ""
 			}
@@ -111,7 +111,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply)
 		DPrintf("Client-PutAppend : reply : %v", reply)
-		if ok && reply.Err == OK {
+		if ok && reply.Err == OK || reply.Err == Repeat {
 			ck.seq++
 			return
 		}

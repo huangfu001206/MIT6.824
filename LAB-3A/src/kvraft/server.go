@@ -14,8 +14,8 @@ const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
 		//raft.Print2File(format, a...)
+		log.Printf(format, a...)
 	}
 	return
 }
@@ -74,15 +74,18 @@ func (kv *KVServer) WaitingForApplyChanReply(method string, args interface{}, re
 	DPrintf("Server-WaitingForApplyChanReply: index : %v\n", index)
 	done := make(chan string)
 	clerkId, seq, _, _ := kv.getArgsAttr(method, args)
+	flag := false
 	go func() {
 		for {
 			DPrintf("(%v) : Server-WaitingForApplyChanReply : start waiting\n", kv.me)
 			kv.applyChanCond.Wait()
+			if flag {
+				break
+			}
 			DPrintf("(%v) : Server-WaitingForApplyChanReply : apply get result success\n", kv.me)
 			_, isFinishExist := kv.hasFinishedReq[clerkId]
-			//DPrintf("(%v) : isFinishExist : %v, index : %v, ClientId : %v\n", kv.me, isFinishExist, kv.hasFinishedReq[clerkId].index, clerkId)
 			if isFinishExist {
-				DPrintf("kv.hasFinishedReq[clerkId].index == index (%v) ; kv.hasFinishedReq[clerkId].seq == seq (%v)", kv.hasFinishedReq[clerkId].index == index, kv.hasFinishedReq[clerkId].seq == seq)
+				DPrintf("kv.hasFinishedReq[clerkId].index(%v) == index (%v) ; kv.hasFinishedReq[clerkId].seq == seq (%v)", kv.hasFinishedReq[clerkId].index, kv.hasFinishedReq[clerkId].index == index, kv.hasFinishedReq[clerkId].seq == seq)
 				if kv.hasFinishedReq[clerkId].index == index {
 					if kv.hasFinishedReq[clerkId].seq == seq {
 						done <- kv.hasFinishedReq[clerkId].reply
@@ -96,6 +99,7 @@ func (kv *KVServer) WaitingForApplyChanReply(method string, args interface{}, re
 				}
 			}
 		}
+		done <- "1"
 	}()
 	select {
 	case res := <-done:
@@ -108,10 +112,20 @@ func (kv *KVServer) WaitingForApplyChanReply(method string, args interface{}, re
 				reply.(*GetReply).Value = res
 			}
 		}
+		//添加到已访问列表
+		kv.hasReqSeq[clerkId] = SeqAndIndex{
+			seq:   seq,
+			index: index,
+		}
+		return
 	case <-time.After(kv.timeout):
+		flag = true
+		kv.applyChanCond.Signal()
 		DPrintf("(%v) : Server-WaitingForApplyChanReply: timeout\n", kv.me)
 		kv.setReplyErr(method, reply, Timeout)
 	}
+	//这个操作是为了让上面的wait操作正常执行完毕，因为如果未执行完毕会出现两种
+	<-done
 }
 
 func (kv *KVServer) setReplyErr(method string, reply interface{}, err Err) {
@@ -182,8 +196,8 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 		//请求正在执行或者执行完毕
 		_, isExistFinished := kv.hasFinishedReq[clerkId]
 		if !isExistFinished || kv.hasFinishedReq[clerkId].seq < seq {
-			//请求未执行完毕，但是正在执行中，那么就没必要发送Start请求，仅仅需要等待即可
-			kv.WaitingForApplyChanReply(method, args, reply, kv.hasReqSeq[clerkId].index)
+			//请求未执行完毕，但是正在执行中
+			kv.setReplyErr(method, reply, Repeat)
 			kv.mu.Unlock()
 			return
 		} else {
@@ -202,10 +216,6 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 			return
 		}
 		kv.mu.Lock()
-		kv.hasReqSeq[clerkId] = SeqAndIndex{
-			seq:   seq,
-			index: chanIndex,
-		}
 		kv.WaitingForApplyChanReply(method, args, reply, chanIndex)
 		kv.mu.Unlock()
 		return
@@ -274,7 +284,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.hasFinishedReq = make(map[int64]SeqAndReply)
 	kv.hasReqSeq = make(map[int64]SeqAndIndex)
 	kv.data = make(map[string]string)
-	kv.timeout = 500 * time.Millisecond
+	kv.timeout = 1000 * time.Millisecond
 	kv.applyChanCond = sync.NewCond(&kv.mu)
 
 	//将applyChan中的已经完成的任务取出，并放置在队列中
@@ -293,6 +303,7 @@ func (kv *KVServer) checkApplyChan() {
 		index := task.CommandIndex
 		content := task.Command.(Op)
 		DPrintf("(%v): ------ checkApplyChan task %v complete --------\n", kv.me, task)
+		DPrintf("------------- index : %v ----------------\n", index)
 		DPrintf("------------- method : %v ---------------\n", content.OpType)
 		DPrintf("------------- key : %v ---------------\n", content.Key)
 		DPrintf("------------- value : %v ---------------\n", content.Value)
