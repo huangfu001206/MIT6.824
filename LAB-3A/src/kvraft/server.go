@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"container/list"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -31,15 +32,23 @@ type Op struct {
 	Seq      int32
 }
 
+// SeqAndReply 最新的请求及结果
 type SeqAndReply struct {
-	seq      int32
-	reply    string
-	clientId int64
-	index    int
+	seq   int32
+	reply string
 }
+
+// SeqAndIndex 已经进行的请求对应的序列号以及预期的日志索引
 type SeqAndIndex struct {
 	seq   int32
 	index int
+}
+
+// Node 对应于每个clientIdList的节点，即请求的clientId、时间撮、以及预期的日志索引
+type Node struct {
+	clientId      int64
+	timestamp     time.Time
+	expectedIndex int
 }
 
 type KVServer struct {
@@ -54,9 +63,12 @@ type KVServer struct {
 	// Your definitions here.
 	hasReqSeq      map[int64]SeqAndIndex //记录每个client发送请求的最大序号
 	hasFinishedReq map[int64]SeqAndReply //记录每个server已经完成的请求（最大序列号）和相应的回复
-	applyChanCond  *sync.Cond            //此条件变量用于 在applyChan取出一个元素并放置在队列中后用于通知正在等待的携程
 	timeout        time.Duration         //超时时间
 	data           map[string]string
+
+	clientIdList    list.List                  //结合map实现LRU算法（每个节点存放的元素为：clientId、timestamp、ExpectedIndex）
+	clientIdMap     map[int64]*list.Element    // 存储clientId对应的链表指针，实现O(1)的删除和移动
+	clientIdChanMap map[int64]chan SeqAndReply // 为每个client建立一个chan用来接收数据，当然也是通过LRU算法来动态调整
 }
 
 func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply interface{}) {
@@ -70,62 +82,48 @@ func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply in
 	}
 }
 
-func (kv *KVServer) WaitingForApplyChanReply(method string, args interface{}, reply interface{}, index int) {
-	DPrintf("Server-WaitingForApplyChanReply: index : %v\n", index)
-	done := make(chan string)
-	clerkId, seq, _, _ := kv.getArgsAttr(method, args)
-	flag := false
-	go func() {
-		for {
-			DPrintf("(%v) : Server-WaitingForApplyChanReply : start waiting\n", kv.me)
-			kv.applyChanCond.Wait()
-			if flag {
-				break
-			}
-			DPrintf("(%v) : Server-WaitingForApplyChanReply : apply get result success\n", kv.me)
-			_, isFinishExist := kv.hasFinishedReq[clerkId]
-			if isFinishExist {
-				DPrintf("kv.hasFinishedReq[clerkId].index(%v) == index (%v) ; kv.hasFinishedReq[clerkId].seq == seq (%v)", kv.hasFinishedReq[clerkId].index, kv.hasFinishedReq[clerkId].index == index, kv.hasFinishedReq[clerkId].seq == seq)
-				if kv.hasFinishedReq[clerkId].index == index {
-					if kv.hasFinishedReq[clerkId].seq == seq {
-						done <- kv.hasFinishedReq[clerkId].reply
-					} else {
-						done <- ErrNoKey
-					}
-					return
-				} else if kv.hasFinishedReq[clerkId].index > index {
-					done <- ErrNoKey
-					return
-				}
-			}
-		}
-		done <- "1"
-	}()
-	select {
-	case res := <-done:
-		DPrintf("Server-WaitingForApplyChanReply: res : %v\n", res)
-		if res == ErrNoKey {
-			kv.setReplyErr(method, reply, ErrNoKey)
+// 删除 kv.clientList 中的指定节点
+func (kv *KVServer) delClientNode(nodePtr *list.Element) {
+	clientId := nodePtr.Value.(*Node).clientId
+	delete(kv.clientIdMap, clientId)
+	delete(kv.clientIdChanMap, clientId)
+	kv.clientIdList.Remove(nodePtr)
+}
+
+func (kv *KVServer) checkTimeOutAndRemove() {
+	now := time.Now()
+	for kv.clientIdList.Len() != 0 {
+		nodePtr := kv.clientIdList.Back()
+		timeDiff := now.Sub(nodePtr.Value.(*Node).timestamp)
+		if timeDiff > kv.timeout {
+			kv.delClientNode(nodePtr)
 		} else {
-			kv.setReplyErr(method, reply, OK)
-			if method == GET {
-				reply.(*GetReply).Value = res
-			}
+			break
 		}
-		//添加到已访问列表
-		kv.hasReqSeq[clerkId] = SeqAndIndex{
-			seq:   seq,
-			index: index,
-		}
-		return
-	case <-time.After(kv.timeout):
-		flag = true
-		kv.applyChanCond.Signal()
-		DPrintf("(%v) : Server-WaitingForApplyChanReply: timeout\n", kv.me)
-		kv.setReplyErr(method, reply, Timeout)
 	}
-	//这个操作是为了让上面的wait操作正常执行完毕，因为如果未执行完毕会出现两种
-	<-done
+}
+
+// 添加最新等待结果的cliendId，如果存在，则无需添加；否则添加，并且根据超时时间将最近未访问的节点删除
+func (kv *KVServer) addNewClient(clientId int64, exceptIndex int) {
+	_, isExistInClientIdMap := kv.clientIdMap[clientId]
+	now := time.Now()
+	if isExistInClientIdMap {
+		//存在,则移动到链表头部（标记为最新访问的client）
+		clientNodePtr := kv.clientIdMap[clientId]
+		kv.clientIdList.Remove(clientNodePtr)
+		clientNodePtr.Value.(*Node).timestamp = now
+		clientNodePtr.Value.(*Node).expectedIndex = exceptIndex
+		kv.clientIdMap[clientId] = kv.clientIdList.PushFront(clientNodePtr)
+	} else {
+		//不存在
+		nodePtr := kv.clientIdList.PushBack(Node{
+			clientId:      clientId,
+			timestamp:     now,
+			expectedIndex: exceptIndex,
+		})
+		kv.clientIdMap[clientId] = nodePtr
+	}
+	kv.checkTimeOutAndRemove()
 }
 
 func (kv *KVServer) setReplyErr(method string, reply interface{}, err Err) {
@@ -134,6 +132,13 @@ func (kv *KVServer) setReplyErr(method string, reply interface{}, err Err) {
 		reply.(*GetReply).Err = err
 	default:
 		reply.(*PutAppendReply).Err = err
+	}
+}
+
+func (kv *KVServer) setReply(method string, reply interface{}, value string) {
+	switch method {
+	case GET:
+		reply.(*GetReply).Value = value
 	}
 }
 
@@ -155,22 +160,28 @@ func (kv *KVServer) getArgsAttr(method string, args interface{}) (clerkId int64,
 	return clerkId, seq, key, value
 }
 
-func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, method string) {
-	// Your code here.
+func (kv *KVServer) checkIsLeader(method string, reply interface{}) bool {
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		kv.setReplyErr(method, reply, ErrWrongLeader)
+		return false
+	}
+	return true
+}
+
+func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, method string) {
+	// Your code here.
+	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		return
 	}
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	//双检锁，为了避免拿到锁后，已经不是leader了
-	_, isLeader = kv.rf.GetState()
-	if !isLeader {
-		kv.setReplyErr(method, reply, ErrWrongLeader)
-		kv.mu.Unlock()
+	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		return
 	}
 	DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
+
 	//获取参数信息
 	clerkId, seq, key, value := kv.getArgsAttr(method, args)
 	//判断当前客户端有没有请求过
@@ -181,46 +192,42 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 			index: -1,
 		}
 	}
-	//用来标记当前请求是否正在执行/过期请求/新的请求
-	isProcessing := kv.hasReqSeq[clerkId].seq == seq
-	isExpired := kv.hasReqSeq[clerkId].seq > seq
-	isNewReq := kv.hasReqSeq[clerkId].seq < seq
-	if isExpired {
-		DPrintf("Server: request isExpired\n")
-		//请求过时,直接返回最新的执行结果即可
+	_, isExistFinished := kv.hasFinishedReq[clerkId]
+	if isExistFinished && kv.hasFinishedReq[clerkId].seq >= seq {
+		//如果该任务已经完成，则直接返回结果即可
+		DPrintf("task has complete\n")
 		kv.GetNewestFinishedTask(method, clerkId, reply)
-		kv.mu.Unlock()
 		return
-	} else if isProcessing {
-		DPrintf("Server: request isProcessing\n")
-		//请求正在执行或者执行完毕
-		_, isExistFinished := kv.hasFinishedReq[clerkId]
-		if !isExistFinished || kv.hasFinishedReq[clerkId].seq < seq {
-			//请求未执行完毕，但是正在执行中
-			kv.setReplyErr(method, reply, Repeat)
-			kv.mu.Unlock()
-			return
-		} else {
-			//请求已经执行完毕，返回执行结果即可
-			kv.GetNewestFinishedTask(method, clerkId, reply)
-			kv.mu.Unlock()
-			return
-		}
-	} else if isNewReq {
-		DPrintf("Server: request isNewReq\n")
-		//请求并未出现过，即新的请求
+	}
+	if kv.hasReqSeq[clerkId].seq == seq {
+		//如果改任务正在执行中，但还没有返回结果，则返回repeat信息即可
+		DPrintf("task is processing\n")
+		kv.setReplyErr(method, reply, Repeat)
+	} else {
+		//该任务未执行，则发起写日志请求即可
+		DPrintf("task is new\n")
 		kv.mu.Unlock()
 		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: method, Key: key, Value: value, Seq: seq, ClientId: clerkId})
 		if !isLeader {
 			kv.setReplyErr(method, reply, ErrWrongLeader)
-			return
 		}
 		kv.mu.Lock()
-		kv.WaitingForApplyChanReply(method, args, reply, chanIndex)
-		kv.mu.Unlock()
-		return
+		if isLeader := kv.checkIsLeader(method, reply); isLeader {
+			kv.addNewClient(clerkId, chanIndex)
+			select {
+			case res := <-kv.clientIdChanMap[clerkId]:
+				if res.seq == seq {
+					kv.setReplyErr(method, reply, OK)
+					kv.setReply(method, reply, res.reply)
+				} else {
+					kv.setReplyErr(method, reply, ErrNoKey)
+				}
+			case <-time.After(kv.timeout):
+				kv.setReplyErr(method, reply, Timeout)
+				//TODO
+			}
+		}
 	}
-
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -285,7 +292,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.hasReqSeq = make(map[int64]SeqAndIndex)
 	kv.data = make(map[string]string)
 	kv.timeout = 1000 * time.Millisecond
-	kv.applyChanCond = sync.NewCond(&kv.mu)
+
+	kv.clientIdList = list.List{}
+	kv.clientIdMap = make(map[int64]*list.Element)
+	kv.clientIdChanMap = make(map[int64]chan SeqAndReply)
 
 	//将applyChan中的已经完成的任务取出，并放置在队列中
 	go kv.checkApplyChan()
@@ -328,10 +338,8 @@ func (kv *KVServer) checkApplyChan() {
 				kv.data[content.Key] += content.Value
 			}
 			kv.hasFinishedReq[content.ClientId] = SeqAndReply{
-				seq:      content.Seq,
-				clientId: content.ClientId,
-				index:    index,
-				reply:    reply,
+				seq:   content.Seq,
+				reply: reply,
 			}
 		}
 		kv.applyChanCond.Signal()

@@ -72,9 +72,11 @@ func (ck *Clerk) Get(key string) string {
 			DPrintf("Client-PutAppend : reply : %v", reply)
 			if reply.Err == OK {
 				ck.seq++
+				DPrintf("PutAppend: start next req %v \n", ck.seq)
 				return reply.Value
 			} else if reply.Err == ErrNoKey || reply.Err == Repeat {
 				ck.seq++
+				DPrintf("PutAppend: start next req %v \n", ck.seq)
 				return ""
 			}
 		}
@@ -111,8 +113,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply)
 		DPrintf("Client-PutAppend : reply : %v", reply)
-		if ok && reply.Err == OK || reply.Err == Repeat {
+		DPrintf("ok : %v\n", ok)
+		if ok && (reply.Err == OK || reply.Err == Repeat) {
 			ck.seq++
+			DPrintf("PutAppend: start next req %v \n", ck.seq)
 			return
 		}
 		ck.leaderIndex = (ck.leaderIndex + 1) % numServer
