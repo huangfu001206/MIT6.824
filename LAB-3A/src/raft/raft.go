@@ -37,7 +37,7 @@ import (
 var LOG bool = false
 
 func Print2File(msg string, args ...interface{}) {
-	logFile, err := os.OpenFile("output.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile("output2.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Println("无法创建日志文件")
 	}
@@ -398,7 +398,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	// *** 加速日志拷贝 *******  效果十分显著
-	defer rf.timer.Reset(0)
+	//defer rf.timer.Reset(0)
 	defer rf.persist(rf.persister.ReadSnapshot())
 	isLeader = true
 	index = len(rf.log) + rf.lastIncludeIndex
@@ -915,9 +915,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Command: "Start",
 	})
 
-	rf.heartBeatTime = time.Duration(100) * time.Millisecond
-	rf.voteBasicTime = 250
-	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%200) * time.Millisecond)
+	rf.heartBeatTime = time.Duration(20) * time.Millisecond
+	rf.voteBasicTime = 50
+	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%20) * time.Millisecond)
 	rf.applyMsgChan = applyCh
 
 	rf.mu.Unlock()

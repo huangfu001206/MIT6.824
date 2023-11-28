@@ -367,6 +367,14 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 	}
 
 	res, info := porcupine.CheckOperationsVerbose(models.KvModel, opLog.Read(), linearizabilityCheckTimeout)
+
+	/** add by huangfu **/
+	file, _ := ioutil.TempFile("", "*.html")
+	porcupine.Visualize(models.KvModel, info, file)
+	fmt.Printf("info: wrote history visualization to %s\n", file.Name())
+
+	/** add by huangfu **/
+
 	if res == porcupine.Illegal {
 		file, err := ioutil.TempFile("", "*.html")
 		if err != nil {

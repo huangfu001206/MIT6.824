@@ -69,14 +69,14 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.Get", &args, &reply)
 		if ok {
-			DPrintf("Client-PutAppend : reply : %v", reply)
+			DPrintf("Client-Get : reply : %v", reply)
 			if reply.Err == OK {
 				ck.seq++
-				DPrintf("PutAppend: start next req %v \n", ck.seq)
+				DPrintf("Get: start next req %v \n", ck.seq)
 				return reply.Value
-			} else if reply.Err == ErrNoKey || reply.Err == Repeat {
+			} else if reply.Err == ErrNoKey {
 				ck.seq++
-				DPrintf("PutAppend: start next req %v \n", ck.seq)
+				DPrintf("Get: start next req %v \n", ck.seq)
 				return ""
 			}
 		}
@@ -113,11 +113,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply)
 		DPrintf("Client-PutAppend : reply : %v", reply)
-		DPrintf("ok : %v\n", ok)
-		if ok && (reply.Err == OK || reply.Err == Repeat) {
-			ck.seq++
-			DPrintf("PutAppend: start next req %v \n", ck.seq)
-			return
+		if ok {
+			if reply.Err == OK {
+				ck.seq++
+				DPrintf("PutAppend: start next req %v \n", ck.seq)
+				return
+			} else if reply.Err == Repeat {
+				time.Sleep(time.Second * 1)
+				continue
+			}
 		}
 		ck.leaderIndex = (ck.leaderIndex + 1) % numServer
 	}
