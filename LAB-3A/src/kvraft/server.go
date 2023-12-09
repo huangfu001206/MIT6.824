@@ -11,12 +11,13 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
-		raft.Print2File(format, a...)
+		//raft.PrintToFile(format, a...)
+		//raft.Print2File(format, a...)
 	}
 	return
 }
@@ -61,7 +62,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	hasReqSeq      map[int64]SeqAndIndex //记录每个client发送请求的最大序号
+	//hasReqSeq      map[int64]SeqAndIndex //记录每个client发送请求的最大序号
 	hasFinishedReq map[int64]SeqAndReply //记录每个server已经完成的请求（最大序列号）和相应的回复
 	timeout        time.Duration         //超时时间
 	data           map[string]string
@@ -75,7 +76,11 @@ func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply in
 	//（这里始终返回最大请求号对应的回复，因为对于每个client来说，重新发送的请求对应的结果一定是之前最新的一个请求）
 	switch method {
 	case GET:
-		reply.(*GetReply).Err = OK
+		if kv.hasFinishedReq[clerkId].reply == "" {
+			reply.(*GetReply).Err = ErrNoKey
+		} else {
+			reply.(*GetReply).Err = OK
+		}
 		reply.(*GetReply).Value = kv.hasFinishedReq[clerkId].reply
 	default:
 		reply.(*PutAppendReply).Err = OK
@@ -84,7 +89,7 @@ func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply in
 
 // 删除 kv.clientList 中的指定节点
 func (kv *KVServer) delClientNode(nodePtr *list.Element) {
-	DPrintf("---------- delClientNode ------------")
+	//DPrintf("---------- delClientNode ------------")
 	clientId := nodePtr.Value.(*Node).clientId
 	delete(kv.clientIdMap, clientId)
 	delete(kv.clientIdChanMap, clientId)
@@ -93,26 +98,26 @@ func (kv *KVServer) delClientNode(nodePtr *list.Element) {
 
 func (kv *KVServer) checkTimeOutAndRemove() {
 	now := time.Now()
-	DPrintf("checkTimeoutAndRemove exit\n")
+	//DPrintf("checkTimeoutAndRemove enter\n")
 	for kv.clientIdList.Len() != 0 {
 		nodePtr := kv.clientIdList.Back()
 		timeDiff := now.Sub((nodePtr.Value).(*Node).timestamp)
 		if timeDiff > kv.timeout {
 			kv.delClientNode(nodePtr)
-			//DPrintf("暂时不删除")
+			////DPrintf("暂时不删除")
 			break
 		} else {
 			break
 		}
 	}
-	DPrintf("checkTimeoutAndRemove exit\n")
+	//DPrintf("checkTimeoutAndRemove exit\n")
 }
 
 // 添加最新等待结果的cliendId，如果存在，则无需添加；否则添加，并且根据超时时间将最近未访问的节点删除
 func (kv *KVServer) addNewClient(clientId int64, exceptIndex int) {
 	_, isExistInClientIdMap := kv.clientIdMap[clientId]
 	now := time.Now()
-	DPrintf("new channel --- clientId : %v, exceptIndex : %v\n", clientId, exceptIndex)
+	//DPrintf("new channel --- clientId : %v, exceptIndex : %v\n", clientId, exceptIndex)
 	if isExistInClientIdMap {
 		//存在,则移动到链表头部（标记为最新访问的client）
 		clientNodePtr := kv.clientIdMap[clientId]
@@ -131,7 +136,7 @@ func (kv *KVServer) addNewClient(clientId int64, exceptIndex int) {
 		kv.clientIdChanMap[clientId] = make(chan SeqAndReply, 1)
 	}
 	kv.checkTimeOutAndRemove()
-	DPrintf("addNewClient exit\n")
+	//DPrintf("addNewClient exit\n")
 }
 
 func (kv *KVServer) setReplyErr(method string, reply interface{}, err Err) {
@@ -169,7 +174,7 @@ func (kv *KVServer) getArgsAttr(method string, args interface{}) (clerkId int64,
 }
 
 func (kv *KVServer) checkIsLeader(method string, reply interface{}) bool {
-	DPrintf("(%v) : checkIsLeader\n", kv.me)
+	//DPrintf("(%v) : checkIsLeader\n", kv.me)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		kv.setReplyErr(method, reply, ErrWrongLeader)
@@ -183,91 +188,77 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		return
 	}
-	DPrintf("(%v) : prepare to obtain lock\n", kv.me)
+	//DPrintf("(%v) : prepare to obtain lock\n", kv.me)
 	kv.mu.Lock()
-	DPrintf("(%v) : obtain lock success\n", kv.me)
+	//DPrintf("(%v) : obtain lock success\n", kv.me)
 	//双检锁，为了避免拿到锁后，已经不是leader了
 	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		kv.mu.Unlock()
 		return
 	}
-	DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
+	//DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
 
 	//获取参数信息
 	clerkId, seq, key, value := kv.getArgsAttr(method, args)
-	//判断当前客户端有没有请求过
-	_, hasRequested := kv.hasReqSeq[clerkId]
-	if !hasRequested {
-		kv.hasReqSeq[clerkId] = SeqAndIndex{
-			seq:   seq - 1,
-			index: -1,
-		}
-	}
 	_, isExistFinished := kv.hasFinishedReq[clerkId]
 	if isExistFinished && kv.hasFinishedReq[clerkId].seq >= seq {
 		//如果该任务已经完成，则直接返回结果即可
-		DPrintf("task has complete\n")
+		//DPrintf("task has complete\n")
 		kv.GetNewestFinishedTask(method, clerkId, reply)
 		kv.mu.Unlock()
 		return
 	}
-	if kv.hasReqSeq[clerkId].seq == seq {
-		//如果改任务正在执行中，但还没有返回结果，则返回repeat信息即可
-		DPrintf("task is processing\n")
-		kv.setReplyErr(method, reply, Repeat)
-		kv.mu.Unlock()
-	} else {
-		//该任务未执行，则发起写日志请求即可
-		DPrintf("task is new\n")
-		kv.mu.Unlock()
-		chanIndex, _, isLeader := kv.rf.Start(Op{OpType: method, Key: key, Value: value, Seq: seq, ClientId: clerkId})
-		DPrintf("call Start success --- index : %v\n", chanIndex)
-		if !isLeader {
-			kv.setReplyErr(method, reply, ErrWrongLeader)
-			return
-		}
-		if isLeader := kv.checkIsLeader(method, reply); isLeader {
-			DPrintf("task is new try to obtain lock\n")
-			kv.mu.Lock()
-			kv.addNewClient(clerkId, chanIndex)
-			origin := kv.hasReqSeq[clerkId]
-			kv.hasReqSeq[clerkId] = SeqAndIndex{
-				seq:   seq,
-				index: chanIndex,
+
+	//该任务未执行，则发起写日志请求即可
+	//DPrintf("task is new\n")
+	kv.mu.Unlock()
+	chanIndex, _, isLeader := kv.rf.Start(Op{OpType: method, Key: key, Value: value, Seq: seq, ClientId: clerkId})
+	//DPrintf("call Start success --- index : %v\n", chanIndex)
+	if !isLeader {
+		kv.setReplyErr(method, reply, ErrWrongLeader)
+		return
+	}
+	if isLeader = kv.checkIsLeader(method, reply); !isLeader {
+		return
+	}
+	kv.mu.Lock()
+	kv.addNewClient(clerkId, chanIndex)
+	clientChan := kv.clientIdChanMap[clerkId]
+	kv.mu.Unlock()
+	//DPrintf("(%v) : waiting 。。。。。。 key : %v, value: %v\n", kv.me, key, value)
+	select {
+	case res := <-clientChan:
+		kv.mu.Lock()
+		if res.seq == seq {
+			if method == GET && res.reply == "" {
+				kv.setReplyErr(method, reply, ErrNoKey)
+			} else {
+				kv.setReplyErr(method, reply, OK)
 			}
-			clientChan := kv.clientIdChanMap[clerkId]
-			kv.mu.Unlock()
-			DPrintf("(%v) : waiting 。。。。。。\n", kv.me)
-			select {
-			case res := <-clientChan:
-				if res.seq == seq {
-					kv.setReplyErr(method, reply, OK)
-					kv.setReply(method, reply, res.reply)
-				} else {
-					kv.setReplyErr(method, reply, ErrNoKey)
-				}
-			case <-time.After(kv.timeout):
-				kv.mu.Lock()
-				DPrintf("(%v) : clientId : %v, timeout expectedIndex : %v\n", kv.me, clerkId, chanIndex)
-				kv.setReplyErr(method, reply, Timeout)
-				kv.hasReqSeq[clerkId] = origin
-				if nodePtr, isExist := kv.clientIdMap[clerkId]; isExist {
-					nodePtr.Value.(*Node).expectedIndex = -1
-				}
-				kv.mu.Unlock()
-			}
+			kv.setReply(method, reply, res.reply)
+		} else {
+			kv.setReplyErr(method, reply, ErrNoKey)
 		}
+		kv.mu.Unlock()
+	case <-time.After(kv.timeout):
+		//DPrintf("(%v) : clientId : %v, timeout expectedIndex : %v\n", kv.me, clerkId, chanIndex)
+		kv.mu.Lock()
+		kv.setReplyErr(method, reply, Timeout)
+		if nodePtr, isExist := kv.clientIdMap[clerkId]; isExist {
+			nodePtr.Value.(*Node).expectedIndex = -1
+		}
+		kv.mu.Unlock()
 	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	DPrintf("****** Server-Get *********\n")
+	//DPrintf("****** Server-Get *********\n")
 	kv.GetAndPutAppendHandler(args, reply, GET)
 
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	DPrintf("****** Server-PutAppend *********\n")
+	//DPrintf("****** Server-PutAppend *********\n")
 	kv.GetAndPutAppendHandler(args, reply, args.Op)
 }
 
@@ -319,9 +310,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	// 初始化
 	kv.hasFinishedReq = make(map[int64]SeqAndReply)
-	kv.hasReqSeq = make(map[int64]SeqAndIndex)
+	//kv.hasReqSeq = make(map[int64]SeqAndIndex)
 	kv.data = make(map[string]string)
-	kv.timeout = 1000 * time.Millisecond
+	kv.timeout = 500 * time.Millisecond
 
 	kv.clientIdList = list.List{}
 	kv.clientIdMap = make(map[int64]*list.Element)
@@ -333,22 +324,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 func (kv *KVServer) sendLog2ClientChan(content Op, index int) {
-	DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v\n", kv.me, content.ClientId, index)
+	////DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v\n", kv.me, content.ClientId, index)
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		return
+	}
 	_, isExistInClientIdChanMap := kv.clientIdChanMap[content.ClientId]
 	if isExistInClientIdChanMap {
 		nodePtr := kv.clientIdMap[content.ClientId]
-		DPrintf("(%v): index1 : %v, index2 : %v\n", kv.me, nodePtr.Value.(*Node).expectedIndex, index)
+		////DPrintf("(%v): index1 : %v, index2 : %v\n", kv.me, nodePtr.Value.(*Node).expectedIndex, index)
 		if nodePtr.Value.(*Node).expectedIndex == index {
-			DPrintf("(%v) : SUCCESS  seq : %v reply : %v\n", kv.me, kv.hasFinishedReq[content.ClientId].seq, kv.hasFinishedReq[content.ClientId].reply)
-			//copyFinishReq := kv.hasFinishedReq[content.ClientId]
-			//copyChan := kv.clientIdChanMap[content.ClientId]
-			//go func() {
-			//	copyChan <- copyFinishReq
-			//}()
+			////DPrintf("(%v) : SUCCESS  seq : %v reply : %v\n", kv.me, kv.hasFinishedReq[content.ClientId].seq, kv.hasFinishedReq[content.ClientId].reply)
 			kv.clientIdChanMap[content.ClientId] <- kv.hasFinishedReq[content.ClientId]
 		}
 	}
-	DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v  exit ....\n", kv.me, content.ClientId, index)
+	////DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v  exit ....\n", kv.me, content.ClientId, index)
 }
 
 /*
@@ -358,35 +347,25 @@ func (kv *KVServer) sendLog2ClientChan(content Op, index int) {
 func (kv *KVServer) checkApplyChan() {
 	for {
 		task := <-kv.applyCh
-		DPrintf("(%v) : checkApplyChan prepare to get lock\n", kv.me)
 		kv.mu.Lock()
-		DPrintf("(%v) : checkApplyChan get lock success\n", kv.me)
 		index := task.CommandIndex
 		content := task.Command.(Op)
-		DPrintf("(%v): ------ checkApplyChan task %v complete --------\n", kv.me, task)
-		//DPrintf("------------- index : %v ----------------\n", index)
-		//DPrintf("------------- method : %v ---------------\n", content.OpType)
-		//DPrintf("------------- key : %v ---------------\n", content.Key)
-		//DPrintf("------------- value : %v ---------------\n", content.Value)
-		//DPrintf("------------- clientId : %v ---------------\n", content.ClientId)
-		DPrintf("------------- seq : %v ---------------\n", content.Seq)
-		//DPrintf("-------------------------------------------------------\n")
+		////DPrintf("(%v): ------ checkApplyChan task %v complete --------\n", kv.me, task)
+		////DPrintf("------------- index : %v ----------------\n", index)
+		////DPrintf("------------- method : %v ---------------\n", content.OpType)
+		////DPrintf("------------- key : %v ---------------\n", content.Key)
+		////DPrintf("------------- value : %v ---------------\n", content.Value)
+		////DPrintf("------------- clientId : %v ---------------\n", content.ClientId)
+		////DPrintf("------------- seq : %v ---------------\n", content.Seq)
+		////DPrintf("-------------------------------------------------------\n")
 
 		_, isFinishedExist := kv.hasFinishedReq[content.ClientId]
-		if isFinishedExist {
-			DPrintf("------------- hasFinishedSeq : %v ---------------\n", kv.hasFinishedReq[content.ClientId].seq)
-		}
 		if !isFinishedExist || (isFinishedExist && (kv.hasFinishedReq[content.ClientId].seq < content.Seq)) {
 			reply := ""
 			switch content.OpType {
 			case GET:
-				_, exist := kv.data[content.Key]
-				if !exist {
-					reply = ErrNoKey
-					DPrintf("(%v) : GET --- ErrNoKey\n", kv.me)
-				} else {
+				if _, exist := kv.data[content.Key]; exist {
 					reply = kv.data[content.Key]
-					DPrintf("(%v) : GET ------- %v\n", kv.me, reply)
 				}
 			case PUT:
 				kv.data[content.Key] = content.Value
@@ -400,7 +379,5 @@ func (kv *KVServer) checkApplyChan() {
 			kv.sendLog2ClientChan(content, index)
 		}
 		kv.mu.Unlock()
-		time.Sleep(2 * time.Millisecond)
-		DPrintf("(%v) : checkApplyChan unlock\n", kv.me)
 	}
 }

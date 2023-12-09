@@ -46,7 +46,9 @@ var t0 = time.Now()
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	start := int64(time.Since(t0))
+	DPrintf("--- Test Get-Start : key : %v ---\n", key)
 	v := ck.Get(key)
+	DPrintf("--- Test Get-End : key : %v ---\n", key)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
@@ -64,7 +66,9 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 
 func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
+	DPrintf("--- Test Put-Start : key : %v, value : %v ---\n", key, value)
 	ck.Put(key, value)
+	DPrintf("--- Test Put-End : key : %v, value : %v ---\n", key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
@@ -80,7 +84,9 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 
 func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
+	DPrintf("--- Test Append-Start : key : %v, value : %v ---\n", key, value)
 	ck.Append(key, value)
+	DPrintf("--- Test Append-End : key : %v, value : %v ---\n", key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
@@ -367,14 +373,9 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 	}
 
 	res, info := porcupine.CheckOperationsVerbose(models.KvModel, opLog.Read(), linearizabilityCheckTimeout)
-
-	/** add by huangfu **/
-	file, _ := ioutil.TempFile("", "*.html")
-	porcupine.Visualize(models.KvModel, info, file)
-	fmt.Printf("info: wrote history visualization to %s\n", file.Name())
-
-	/** add by huangfu **/
-
+	//file, _ := ioutil.TempFile("", "*.html")
+	//porcupine.Visualize(models.KvModel, info, file)
+	//fmt.Printf("info: wrote history visualization to %s\n", file.Name())
 	if res == porcupine.Illegal {
 		file, err := ioutil.TempFile("", "*.html")
 		if err != nil {

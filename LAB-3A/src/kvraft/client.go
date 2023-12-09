@@ -54,7 +54,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	DPrintf("Client-Get : key : %v, op : %v\n", key, "Get")
+	DPrintf("Client-Get(%v) : key : %v, op : %v\n", ck.clerkId, key, "Get")
 	// You will have to modify this function.
 	if ck.leaderIndex == -1 {
 		ck.leaderIndex = 0
@@ -65,18 +65,19 @@ func (ck *Clerk) Get(key string) string {
 		Seq:     ck.seq,
 		ClerkId: ck.clerkId,
 	}
-	reply := GetReply{}
 	for {
+		reply := GetReply{}
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.Get", &args, &reply)
 		if ok {
-			DPrintf("Client-Get : reply : %v", reply)
+			//DPrintf("&&&&&& Client-Get(%v) : reply : %v", ck.clerkId, reply)
 			if reply.Err == OK {
 				ck.seq++
-				DPrintf("Get: start next req %v \n", ck.seq)
+				DPrintf("&&&&&& Client-Get(%v) : key : %v, op : %v  res : %v seq : %v SUCCESS \n", ck.clerkId, key, "Get", reply.Err, ck.seq)
 				return reply.Value
 			} else if reply.Err == ErrNoKey {
 				ck.seq++
-				DPrintf("Get: start next req %v \n", ck.seq)
+				//DPrintf("Get: start next req %v \n", ck.seq)
+				DPrintf("&&&&&& Client-Get(%v) : key : %v, op : %v  res : %v seq : %v SUCCESS\n", ck.clerkId, key, "Get", reply.Err, ck.seq)
 				return ""
 			}
 		}
@@ -94,7 +95,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
-	DPrintf("Client-PutAppend : key : %v, value : %v, op : %v\n", key, value, op)
+	//DPrintf("Client-PutAppend : key : %v, value : %v, op : %v\n", key, value, op)
 
 	// You will have to modify this function.
 	if ck.leaderIndex == -1 {
@@ -109,18 +110,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClerkId: ck.clerkId,
 		Seq:     ck.seq,
 	}
-	reply := PutAppendReply{}
 	for {
+		reply := PutAppendReply{}
 		ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply)
-		DPrintf("Client-PutAppend : reply : %v", reply)
+		//DPrintf("Client-PutAppend(%v)-->(%v) : reply : %v", ck.clerkId, ck.leaderIndex, reply)
 		if ok {
 			if reply.Err == OK {
 				ck.seq++
-				DPrintf("PutAppend: start next req %v \n", ck.seq)
+				//DPrintf("PutAppend: start next req %v \n", ck.seq)
 				return
-			} else if reply.Err == Repeat {
-				time.Sleep(time.Second * 1)
-				continue
 			}
 		}
 		ck.leaderIndex = (ck.leaderIndex + 1) % numServer
@@ -128,10 +126,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	DPrintf("Client-Put: key : %v , value : %v\n", key, value)
+	DPrintf("&&&&&& Client-Put(%v): key : %v , value : %v\n", ck.clerkId, key, value)
 	ck.PutAppend(key, value, PUT)
+	DPrintf("&&&&&& Client-Put(%v): key : %v , value : %v seq : %v SUCCESS\n", ck.clerkId, key, value, ck.seq)
 }
 func (ck *Clerk) Append(key string, value string) {
-	DPrintf("Client-Append: key : %v , value : %v\n", key, value)
+	DPrintf("&&&&&& Client-Append(%v): key : %v , value : %v\n", ck.clerkId, key, value)
 	ck.PutAppend(key, value, APPEND)
+	DPrintf("&&&&&& Client-Append(%v): key : %v , value : seq : %v %v SUCCESS\n", ck.clerkId, key, value, ck.seq)
 }

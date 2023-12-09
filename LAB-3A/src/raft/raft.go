@@ -34,10 +34,10 @@ import (
 	"6.5840/labrpc"
 )
 
-var LOG bool = false
+var LOG bool = true
 
 func Print2File(msg string, args ...interface{}) {
-	logFile, err := os.OpenFile("output2.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile("output3.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Println("无法创建日志文件")
 	}

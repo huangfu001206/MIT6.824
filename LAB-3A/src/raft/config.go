@@ -144,9 +144,6 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
-			DebugPrintf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
-			DebugPrintf("commit index=%v server=%v %v != server=%v %v",
-				m.CommandIndex, i, m.Command, j, old)
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
@@ -443,7 +440,7 @@ func (cfg *config) checkOneLeader() int {
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
-				cfg.t.Fatalf("term %d has %d (>1) leaders", term, len(leaders))
+				cfg.t.Fatalf("Term %d has %d (>1) leaders", term, len(leaders))
 			}
 			if term > lastTermWithLeader {
 				lastTermWithLeader = term
@@ -458,7 +455,7 @@ func (cfg *config) checkOneLeader() int {
 	return -1
 }
 
-// check that everyone agrees on the term.
+// check that everyone agrees on the Term.
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
@@ -467,7 +464,7 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
-				cfg.t.Fatalf("servers disagree on term")
+				cfg.t.Fatalf("servers disagree on Term")
 			}
 		}
 	}
@@ -594,7 +591,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				DebugPrintf("one(%v) failed to reach agreement", cmd)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -602,7 +598,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 	}
 	if cfg.checkFinished() == false {
-		DebugPrintf("one(%v) failed to reach agreement", cmd)
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
@@ -635,8 +630,15 @@ func (cfg *config) end() {
 		ncmds := cfg.maxIndex - cfg.maxIndex0   // number of Raft agreements reported
 		cfg.mu.Unlock()
 
+		//add
+		PrintToFile("  ... Passed --")
+		PrintToFile("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
+		PrintToFile("\n\n\n\n\n\n\n\n\n\n\n")
+		//add end
+
 		fmt.Printf("  ... Passed --")
 		fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
+		fmt.Println(time.Now()) //add
 	}
 }
 
