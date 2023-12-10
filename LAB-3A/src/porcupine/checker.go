@@ -188,9 +188,9 @@ func checkSingle(model Model, history []entry, computePartial bool, kill *int32)
 	state := model.Init()
 	headEntry := insertBefore(&node{value: nil, match: nil, id: -1}, entry)
 	for headEntry.next != nil {
-		if atomic.LoadInt32(kill) != 0 {
-			return false, longest
-		}
+		//if atomic.LoadInt32(kill) != 0 {
+		//	return false, longest
+		//}
 		if entry.match != nil {
 			matching := entry.match // the return entry
 			ok, newState := model.Step(state, entry.value, matching.value)

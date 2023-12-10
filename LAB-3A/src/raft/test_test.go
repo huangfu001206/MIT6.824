@@ -30,18 +30,18 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
-	// election, then check that all peers agree on the Term.
+	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
 	if term1 < 1 {
-		t.Fatalf("Term is %v, but should be at least 1", term1)
+		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
 
-	// does the leader+Term stay the same if there is no network failure?
+	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
-		fmt.Printf("warning: Term changed even though there were no failures")
+		fmt.Printf("warning: term changed even though there were no failures")
 	}
 
 	// there should still be a leader.
@@ -277,8 +277,9 @@ func TestFailAgree2B(t *testing.T) {
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
+	//fmt.Printf("********** leader : %v ***********\n", leader)
 	cfg.disconnect((leader + 1) % servers)
-
+	//fmt.Printf("*********** disconnect %v ************\n", (leader+1)%servers)
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
@@ -289,7 +290,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-
+	//fmt.Printf("*********** reconnect %v ************\n", (leader+1)%servers)
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
 	// on new commands.
@@ -396,7 +397,7 @@ loop:
 
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
-				// Term changed -- can't expect low RPC counts
+				// term changed -- can't expect low RPC counts
 				continue loop
 			}
 		}
@@ -446,7 +447,7 @@ loop:
 	}
 
 	if !success {
-		t.Fatalf("Term changed too often")
+		t.Fatalf("term changed too often")
 	}
 
 	cfg.end()
@@ -519,7 +520,6 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
@@ -527,6 +527,7 @@ func TestBackup2B(t *testing.T) {
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -612,7 +613,7 @@ loop:
 				continue loop
 			}
 			if !ok {
-				// No longer the leader, so Term has changed
+				// No longer the leader, so term has changed
 				continue loop
 			}
 			if starti+i != index1 {
@@ -624,7 +625,7 @@ loop:
 			cmd := cfg.wait(starti+i, servers, term)
 			if ix, ok := cmd.(int); ok == false || ix != cmds[i-1] {
 				if ix == -1 {
-					// Term changed -- try again
+					// term changed -- try again
 					continue loop
 				}
 				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, starti+i, cmds)
@@ -635,7 +636,7 @@ loop:
 		total2 = 0
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
-				// Term changed -- can't expect low RPC counts
+				// term changed -- can't expect low RPC counts
 				// need to keep going to update total2
 				failed = true
 			}
@@ -655,7 +656,7 @@ loop:
 	}
 
 	if !success {
-		t.Fatalf("Term changed too often")
+		t.Fatalf("term changed too often")
 	}
 
 	time.Sleep(RaftElectionTimeout)
@@ -800,7 +801,7 @@ func TestPersist32C(t *testing.T) {
 // probability (perhaps without committing the command), or crash after a while
 // with low probability (most likey committing the command).  If the number of
 // alive servers isn't enough to form a majority, perhaps start a new server.
-// The leader in a new Term may try to finish replicating log entries that
+// The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
 func TestFigure82C(t *testing.T) {
 	servers := 5

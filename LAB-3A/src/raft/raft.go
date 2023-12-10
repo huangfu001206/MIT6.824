@@ -34,7 +34,7 @@ import (
 	"6.5840/labrpc"
 )
 
-var LOG bool = true
+var LOG bool = false
 
 func Print2File(msg string, args ...interface{}) {
 	logFile, err := os.OpenFile("output3.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -916,7 +916,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	})
 
 	rf.heartBeatTime = time.Duration(20) * time.Millisecond
-	rf.voteBasicTime = 50
+	rf.voteBasicTime = 25
 	rf.timer = time.NewTimer(time.Duration(rf.voteBasicTime+rand.Int31()%20) * time.Millisecond)
 	rf.applyMsgChan = applyCh
 
