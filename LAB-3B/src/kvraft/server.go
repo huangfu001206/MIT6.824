@@ -4,14 +4,16 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"container/list"
+	"encoding/gob"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -188,15 +190,13 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		return
 	}
-	//DPrintf("(%v) : prepare to obtain lock\n", kv.me)
 	kv.mu.Lock()
-	//DPrintf("(%v) : obtain lock success\n", kv.me)
 	//双检锁，为了避免拿到锁后，已经不是leader了
 	if isLeader := kv.checkIsLeader(method, reply); !isLeader {
 		kv.mu.Unlock()
 		return
 	}
-	//DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
+	DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
 
 	//获取参数信息
 	clerkId, seq, key, value := kv.getArgsAttr(method, args)
@@ -213,7 +213,7 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	//DPrintf("task is new\n")
 	kv.mu.Unlock()
 	chanIndex, _, isLeader := kv.rf.Start(Op{OpType: method, Key: key, Value: value, Seq: seq, ClientId: clerkId})
-	//DPrintf("call Start success --- index : %v\n", chanIndex)
+	DPrintf("call Start success --- index : %v\n", chanIndex)
 	if !isLeader {
 		kv.setReplyErr(method, reply, ErrWrongLeader)
 		return
@@ -228,7 +228,6 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	//DPrintf("(%v) : waiting 。。。。。。 key : %v, value: %v\n", kv.me, key, value)
 	select {
 	case res := <-clientChan:
-		kv.mu.Lock()
 		if res.seq == seq {
 			if method == GET && res.reply == "" {
 				kv.setReplyErr(method, reply, ErrNoKey)
@@ -239,7 +238,6 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 		} else {
 			kv.setReplyErr(method, reply, ErrNoKey)
 		}
-		kv.mu.Unlock()
 	case <-time.After(kv.timeout):
 		//DPrintf("(%v) : clientId : %v, timeout expectedIndex : %v\n", kv.me, clerkId, chanIndex)
 		kv.mu.Lock()
@@ -323,8 +321,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
+/*
+*
+sendLog2ClientChan - 收到raft层所得到的日志信息，通过管道通知等待结果的其他协程
+*/
 func (kv *KVServer) sendLog2ClientChan(content Op, index int) {
-	////DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v\n", kv.me, content.ClientId, index)
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		return
 	}
@@ -337,46 +338,78 @@ func (kv *KVServer) sendLog2ClientChan(content Op, index int) {
 			kv.clientIdChanMap[content.ClientId] <- kv.hasFinishedReq[content.ClientId]
 		}
 	}
-	////DPrintf("(%v) : sendLog2ClientChan --- clientId : %v, index : %v  exit ....\n", kv.me, content.ClientId, index)
 }
 
 /*
 *
-将applyChan中已经完成的任务放入recordList中，并告知所有的等待的线程
+commandHandler - checkApplyChan接收到普通日志同步的信息后，调用此函数来实现kvServer的更新
 */
+func (kv *KVServer) commandHandler(index int, content Op) {
+	_, isFinishedExist := kv.hasFinishedReq[content.ClientId]
+	if !isFinishedExist || (isFinishedExist && (kv.hasFinishedReq[content.ClientId].seq < content.Seq)) {
+		reply := ""
+		switch content.OpType {
+		case GET:
+			if _, exist := kv.data[content.Key]; exist {
+				reply = kv.data[content.Key]
+			}
+		case PUT:
+			kv.data[content.Key] = content.Value
+		case APPEND:
+			kv.data[content.Key] += content.Value
+		}
+		kv.hasFinishedReq[content.ClientId] = SeqAndReply{
+			seq:   content.Seq,
+			reply: reply,
+		}
+
+		if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+			//日志过长，需要发起快照请求
+			w := new(bytes.Buffer)
+			encoder := gob.NewEncoder(w)
+			encoder.Encode(kv.data)
+			encoder.Encode(kv.hasFinishedReq)
+			data := w.Bytes()
+			kv.rf.Snapshot(index, data)
+		}
+		kv.sendLog2ClientChan(content, index)
+	}
+}
+
+/*
+*
+snapShotHandler - checkApplyChan接收到快照同步的信息后，调用此函数来实现kvServer的更新
+*/
+func (kv *KVServer) snapShotHandler(snapshot []byte, index int) {
+	kv.data = make(map[string]string)
+	kv.hasFinishedReq = make(map[int64]SeqAndReply)
+	r := bytes.NewBuffer(snapshot)
+	d := gob.NewDecoder(r)
+	err := d.Decode(&kv.data)
+	if err != nil {
+		return
+	}
+	err = d.Decode(&kv.hasFinishedReq)
+	if err != nil {
+		return
+	}
+}
+
+/*
+*checkApplyChan 将applyChan中已经完成的任务放入recordList中，并告知所有的等待的线程
+ */
 func (kv *KVServer) checkApplyChan() {
 	for {
 		task := <-kv.applyCh
 		kv.mu.Lock()
-		index := task.CommandIndex
-		content := task.Command.(Op)
-		////DPrintf("(%v): ------ checkApplyChan task %v complete --------\n", kv.me, task)
-		////DPrintf("------------- index : %v ----------------\n", index)
-		////DPrintf("------------- method : %v ---------------\n", content.OpType)
-		////DPrintf("------------- key : %v ---------------\n", content.Key)
-		////DPrintf("------------- value : %v ---------------\n", content.Value)
-		////DPrintf("------------- clientId : %v ---------------\n", content.ClientId)
-		////DPrintf("------------- seq : %v ---------------\n", content.Seq)
-		////DPrintf("-------------------------------------------------------\n")
-
-		_, isFinishedExist := kv.hasFinishedReq[content.ClientId]
-		if !isFinishedExist || (isFinishedExist && (kv.hasFinishedReq[content.ClientId].seq < content.Seq)) {
-			reply := ""
-			switch content.OpType {
-			case GET:
-				if _, exist := kv.data[content.Key]; exist {
-					reply = kv.data[content.Key]
-				}
-			case PUT:
-				kv.data[content.Key] = content.Value
-			case APPEND:
-				kv.data[content.Key] += content.Value
-			}
-			kv.hasFinishedReq[content.ClientId] = SeqAndReply{
-				seq:   content.Seq,
-				reply: reply,
-			}
-			kv.sendLog2ClientChan(content, index)
+		if task.CommandValid {
+			// 非快照,普通日志同步
+			index := task.CommandIndex
+			content := task.Command.(Op)
+			kv.commandHandler(index, content)
+		} else {
+			//快照同步
+			kv.snapShotHandler(task.Snapshot, task.SnapshotIndex)
 		}
 		kv.mu.Unlock()
 	}
