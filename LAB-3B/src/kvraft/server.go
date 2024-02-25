@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -37,8 +37,8 @@ type Op struct {
 
 // SeqAndReply 最新的请求及结果
 type SeqAndReply struct {
-	seq   int32
-	reply string
+	Seq   int32
+	Reply string
 }
 
 // SeqAndIndex 已经进行的请求对应的序列号以及预期的日志索引
@@ -64,7 +64,6 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	//hasReqSeq      map[int64]SeqAndIndex //记录每个client发送请求的最大序号
 	hasFinishedReq map[int64]SeqAndReply //记录每个server已经完成的请求（最大序列号）和相应的回复
 	timeout        time.Duration         //超时时间
 	data           map[string]string
@@ -78,12 +77,12 @@ func (kv *KVServer) GetNewestFinishedTask(method string, clerkId int64, reply in
 	//（这里始终返回最大请求号对应的回复，因为对于每个client来说，重新发送的请求对应的结果一定是之前最新的一个请求）
 	switch method {
 	case GET:
-		if kv.hasFinishedReq[clerkId].reply == "" {
+		if kv.hasFinishedReq[clerkId].Reply == "" {
 			reply.(*GetReply).Err = ErrNoKey
 		} else {
 			reply.(*GetReply).Err = OK
 		}
-		reply.(*GetReply).Value = kv.hasFinishedReq[clerkId].reply
+		reply.(*GetReply).Value = kv.hasFinishedReq[clerkId].Reply
 	default:
 		reply.(*PutAppendReply).Err = OK
 	}
@@ -106,8 +105,6 @@ func (kv *KVServer) checkTimeOutAndRemove() {
 		timeDiff := now.Sub((nodePtr.Value).(*Node).timestamp)
 		if timeDiff > kv.timeout {
 			kv.delClientNode(nodePtr)
-			////DPrintf("暂时不删除")
-			break
 		} else {
 			break
 		}
@@ -196,12 +193,12 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 		kv.mu.Unlock()
 		return
 	}
-	DPrintf("(%v) : is Leader, method : %v\n", kv.me, method)
-
+	DPrintf("(%v) : is Leader, method : %v, value : %v\n", kv.me, method, args)
+	//kv.displayKvData()
 	//获取参数信息
 	clerkId, seq, key, value := kv.getArgsAttr(method, args)
 	_, isExistFinished := kv.hasFinishedReq[clerkId]
-	if isExistFinished && kv.hasFinishedReq[clerkId].seq >= seq {
+	if isExistFinished && kv.hasFinishedReq[clerkId].Seq >= seq {
 		//如果该任务已经完成，则直接返回结果即可
 		//DPrintf("task has complete\n")
 		kv.GetNewestFinishedTask(method, clerkId, reply)
@@ -225,16 +222,17 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 	kv.addNewClient(clerkId, chanIndex)
 	clientChan := kv.clientIdChanMap[clerkId]
 	kv.mu.Unlock()
-	//DPrintf("(%v) : waiting 。。。。。。 key : %v, value: %v\n", kv.me, key, value)
+	DPrintf("(%v) : waiting 。。。。。。 key : %v, value: %v\n", kv.me, key, value)
 	select {
 	case res := <-clientChan:
-		if res.seq == seq {
-			if method == GET && res.reply == "" {
+		DPrintf("(%v) : receive message from clientChan, res.Seq = (%v), seq = (%v)\n", kv.me, res.Seq, seq)
+		if res.Seq == seq {
+			if method == GET && res.Reply == "" {
 				kv.setReplyErr(method, reply, ErrNoKey)
 			} else {
 				kv.setReplyErr(method, reply, OK)
 			}
-			kv.setReply(method, reply, res.reply)
+			kv.setReply(method, reply, res.Reply)
 		} else {
 			kv.setReplyErr(method, reply, ErrNoKey)
 		}
@@ -247,6 +245,7 @@ func (kv *KVServer) GetAndPutAppendHandler(args interface{}, reply interface{}, 
 		}
 		kv.mu.Unlock()
 	}
+	//kv.displayKvData()
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -308,13 +307,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	// 初始化
 	kv.hasFinishedReq = make(map[int64]SeqAndReply)
-	//kv.hasReqSeq = make(map[int64]SeqAndIndex)
 	kv.data = make(map[string]string)
 	kv.timeout = 500 * time.Millisecond
 
 	kv.clientIdList = list.List{}
 	kv.clientIdMap = make(map[int64]*list.Element)
 	kv.clientIdChanMap = make(map[int64]chan SeqAndReply)
+
+	//从快照中获取保存的数据
+	kv.snapShotHandler(persister.ReadSnapshot())
 
 	//将applyChan中的已经完成的任务取出，并放置在队列中
 	go kv.checkApplyChan()
@@ -346,7 +347,7 @@ commandHandler - checkApplyChan接收到普通日志同步的信息后，调用�
 */
 func (kv *KVServer) commandHandler(index int, content Op) {
 	_, isFinishedExist := kv.hasFinishedReq[content.ClientId]
-	if !isFinishedExist || (isFinishedExist && (kv.hasFinishedReq[content.ClientId].seq < content.Seq)) {
+	if !isFinishedExist || (isFinishedExist && (kv.hasFinishedReq[content.ClientId].Seq < content.Seq)) {
 		reply := ""
 		switch content.OpType {
 		case GET:
@@ -359,20 +360,35 @@ func (kv *KVServer) commandHandler(index int, content Op) {
 			kv.data[content.Key] += content.Value
 		}
 		kv.hasFinishedReq[content.ClientId] = SeqAndReply{
-			seq:   content.Seq,
-			reply: reply,
+			Seq:   content.Seq,
+			Reply: reply,
 		}
-
+		DPrintf("kv.rf.GetRaftStateSize : (%v) , kv.maxraftstate : (%v)\n", kv.rf.GetRaftStateSize(), kv.maxraftstate)
 		if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+			DPrintf("(%v) : 发起快照请求～～～～～\n", kv.me)
 			//日志过长，需要发起快照请求
 			w := new(bytes.Buffer)
 			encoder := gob.NewEncoder(w)
-			encoder.Encode(kv.data)
-			encoder.Encode(kv.hasFinishedReq)
+			err := encoder.Encode(kv.data)
+			if err != nil {
+				DPrintf("kv.data encode error\n")
+			}
+			err = encoder.Encode(kv.hasFinishedReq)
+			if err != nil {
+				DPrintf("kv.hasFinishedReq encode error\n")
+			}
 			data := w.Bytes()
 			kv.rf.Snapshot(index, data)
+			DPrintf("(%v) Snapshot : Size = %v\n", kv.me, kv.rf.GetRaftStateSize())
 		}
 		kv.sendLog2ClientChan(content, index)
+	}
+}
+
+func (kv *KVServer) displayKvData() {
+	DPrintf("------------ Display KV Data ----------------\n")
+	for key, value := range kv.data {
+		DPrintf("key : %v  value : %v\n", key, value)
 	}
 }
 
@@ -380,17 +396,20 @@ func (kv *KVServer) commandHandler(index int, content Op) {
 *
 snapShotHandler - checkApplyChan接收到快照同步的信息后，调用此函数来实现kvServer的更新
 */
-func (kv *KVServer) snapShotHandler(snapshot []byte, index int) {
+func (kv *KVServer) snapShotHandler(snapshot []byte) {
+	DPrintf("(%v) : SnapShot Synchronize logs\n", kv.me)
 	kv.data = make(map[string]string)
 	kv.hasFinishedReq = make(map[int64]SeqAndReply)
 	r := bytes.NewBuffer(snapshot)
 	d := gob.NewDecoder(r)
 	err := d.Decode(&kv.data)
 	if err != nil {
+		DPrintf("kv.data 解码错误\n")
 		return
 	}
 	err = d.Decode(&kv.hasFinishedReq)
 	if err != nil {
+		DPrintf("kv.hasFinishedReq 解码错误\n")
 		return
 	}
 }
@@ -409,7 +428,7 @@ func (kv *KVServer) checkApplyChan() {
 			kv.commandHandler(index, content)
 		} else {
 			//快照同步
-			kv.snapShotHandler(task.Snapshot, task.SnapshotIndex)
+			kv.snapShotHandler(task.Snapshot)
 		}
 		kv.mu.Unlock()
 	}
